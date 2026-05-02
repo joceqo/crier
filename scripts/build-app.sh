@@ -31,6 +31,15 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/Crier"
 
+# Generate AppIcon.icns from the SF Symbol "megaphone.fill" on a brand-orange
+# tile. make-icon.swift renders a Crier.iconset of PNGs at the required
+# sizes; iconutil packages it into the .icns macOS expects.
+ICONSET="$REPO_DIR/.build/Crier.iconset"
+echo "==> Rendering AppIcon"
+swift "$REPO_DIR/scripts/make-icon.swift" "$ICONSET" >/dev/null
+iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
+rm -rf "$ICONSET"
+
 # Brand icons from @lobehub/lobe-icons (vendored as SVGs in assets/icons).
 if [ -d "$REPO_DIR/assets/icons" ]; then
     cp "$REPO_DIR"/assets/icons/*.svg "$APP/Contents/Resources/" 2>/dev/null || true
@@ -46,6 +55,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key>                <string>Crier</string>
   <key>CFBundleDisplayName</key>         <string>Crier</string>
   <key>CFBundleExecutable</key>          <string>Crier</string>
+  <key>CFBundleIconFile</key>            <string>AppIcon</string>
   <key>CFBundlePackageType</key>         <string>APPL</string>
   <key>CFBundleVersion</key>             <string>0.0.1</string>
   <key>CFBundleShortVersionString</key>  <string>0.0.1</string>

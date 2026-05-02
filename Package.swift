@@ -10,6 +10,7 @@ let package = Package(
         .executable(name: "crier-emit", targets: ["CrierEmit"]),
         .executable(name: "crier-wrap", targets: ["CrierWrap"]),
         .library(name: "CrierServer", targets: ["CrierServer"]),
+        .library(name: "CrierEmitCore", targets: ["CrierEmitCore"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
@@ -26,6 +27,10 @@ let package = Package(
             ],
             path: "Sources/CrierServer"
         ),
+        .target(
+            name: "CrierEmitCore",
+            path: "Sources/CrierEmitCore"
+        ),
         .executableTarget(
             name: "CrierDaemon",
             dependencies: ["CrierServer"],
@@ -40,7 +45,16 @@ let package = Package(
             ],
             path: "Sources/CrierUI"
         ),
-        .executableTarget(name: "CrierEmit", path: "Sources/CrierEmit"),
+        .executableTarget(
+            name: "CrierEmit",
+            dependencies: ["CrierEmitCore"],
+            path: "Sources/CrierEmit"
+        ),
         .executableTarget(name: "CrierWrap", path: "Sources/CrierWrap"),
+        .testTarget(
+            name: "CrierEmitCoreTests",
+            dependencies: ["CrierEmitCore"],
+            path: "Tests/CrierEmitCoreTests"
+        ),
     ]
 )

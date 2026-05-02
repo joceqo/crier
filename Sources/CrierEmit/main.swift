@@ -1,5 +1,5 @@
 import Foundation
-import CryptoKit
+import CrierEmitCore
 
 // crier-emit <agent> <event>
 //   agent: claude-code | codex | cursor | ...
@@ -69,30 +69,6 @@ func sh(_ args: [String]) -> String? {
     return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
-func extractLastAssistantMessage(transcriptPath: String) -> String {
-    guard let raw = try? String(contentsOf: URL(fileURLWithPath: transcriptPath), encoding: .utf8) else { return "" }
-    let lines = raw.split(separator: "\n", omittingEmptySubsequences: true)
-    for line in lines.reversed() {
-        guard let data = line.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              (obj["type"] as? String) == "assistant",
-              let message = obj["message"] as? [String: Any] else { continue }
-
-        if let s = message["content"] as? String, !s.isEmpty { return s }
-        if let blocks = message["content"] as? [[String: Any]] {
-            var parts: [String] = []
-            for block in blocks where (block["type"] as? String) == "text" {
-                if let t = block["text"] as? String, !t.isEmpty { parts.append(t) }
-            }
-            // Only return if we actually found text. If this assistant entry
-            // is e.g. a tool_use-only line, fall through and keep walking
-            // backward for the previous assistant text.
-            if !parts.isEmpty { return parts.joined(separator: "\n") }
-        }
-    }
-    return ""
-}
-
 func prettyAgentName(_ a: String) -> String {
     switch a {
     case "claude-code": return "Claude Code"
@@ -154,7 +130,7 @@ case "claude-code", "cursor":
         var attempts = 0
         let maxAttempts = 10
         while attempts < maxAttempts {
-            lastMessage = extractLastAssistantMessage(transcriptPath: p)
+            lastMessage = CrierEmitCore.extractLastAssistantMessage(transcriptPath: p)
             if !lastMessage.isEmpty { break }
             attempts += 1
             if attempts < maxAttempts { usleep(150_000) }  // 150ms
@@ -219,14 +195,8 @@ func postEvent(_ data: Data, timeout: TimeInterval = 2.5) {
 // Touched by `/crier off` (the SKILL.md skill) and by the UI's "Disable for
 // this session" button. Filesystem-based so it survives daemon restarts and
 // works without the daemon running at all.
-func crierDisabledPath(forCwd cwd: String) -> String {
-    let digest = Insecure.MD5.hash(data: Data(cwd.utf8))
-    let hex = digest.map { String(format: "%02x", $0) }.joined()
-    return "/tmp/crier-agent/disabled-\(hex)"
-}
-
 func isCwdDisabled(_ cwd: String) -> Bool {
-    FileManager.default.fileExists(atPath: crierDisabledPath(forCwd: cwd))
+    FileManager.default.fileExists(atPath: CrierEmitCore.disabledPath(forCwd: cwd))
 }
 
 func longPollReply(requestId: String, waitSeconds: Int) -> String? {
@@ -250,9 +220,14 @@ func longPollReply(requestId: String, waitSeconds: Int) -> String? {
 log("start: agent=\(agent) event=\(event) blocking=\(blockingEvent) request_id=\(requestId)")
 log("cwd=\(cwd) tmux_pane=\(env["TMUX_PANE"] ?? "-")")
 
-// Short-circuit if the user has disabled Crier for this CWD (via `/crier
-// off` skill or the UI's "Disable for this session" button). Skip the panel
-// pop entirely, don't block the hook chain, just exit.
+// Short-circuit if Crier is disabled — either globally (via the menu-bar
+// status item) or for this CWD (via `/crier off` or the UI's "Disable for
+// this session" button). In both cases skip the panel pop entirely and
+// exit 0 so the hook chain unblocks normally.
+if CrierEmitCore.isGloballyDisabled() {
+    log("global disable flag present — skipping")
+    exit(0)
+}
 if isCwdDisabled(cwd) {
     log("disabled flag present for cwd=\(cwd) — skipping")
     exit(0)

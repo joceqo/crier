@@ -596,11 +596,19 @@ final class CrierBorderlessPanel: NSPanel {
 }
 
 
+// Path of the global "Crier disabled" flag file. Mirrors the per-CWD pattern
+// in confirmDisableSession() / crier-emit but applies project-wide. When
+// present, every Stop hook short-circuits in crier-emit (post-update there)
+// and the panel never pops. The status item toggles this file.
+private let crierGlobalDisabledPath = "/tmp/crier-agent/disabled-global"
+
 final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     let state = CrierState()
     var panel: NSPanel!
     var subscriberTask: Task<Void, Never>?
     var lastTerminalApp: NSRunningApplication?
+    var statusItem: NSStatusItem?
+    var statusDisableItem: NSMenuItem?
 
     // Install a minimal main menu — `.accessory` apps don't get one by default,
     // and without an Edit menu macOS doesn't route Cmd+C/V/X/A through the
@@ -632,9 +640,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         NSApp.mainMenu = mainMenu
     }
 
+    // Menu-bar status item — megaphone icon in the top-right, dropdown
+    // exposes the global Disable toggle and a Quit entry. Sessions list /
+    // per-session controls land in pass 2 once the daemon tracks them.
+    func installStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        if let button = item.button {
+            let cfg = NSImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
+            let icon = NSImage(systemSymbolName: "megaphone.fill",
+                               accessibilityDescription: "Crier")?
+                .withSymbolConfiguration(cfg)
+            icon?.isTemplate = true  // adopts menu-bar tinting (light/dark)
+            button.image = icon
+            button.toolTip = "Crier"
+        }
+
+        let menu = NSMenu()
+
+        let disableItem = NSMenuItem(
+            title: "Disable Crier (Global)",
+            action: #selector(toggleGlobalDisable(_:)),
+            keyEquivalent: ""
+        )
+        disableItem.target = self
+        statusDisableItem = disableItem
+        menu.addItem(disableItem)
+
+        menu.addItem(.separator())
+
+        let quitItem = NSMenuItem(
+            title: "Quit Crier",
+            action: #selector(quitApp(_:)),
+            keyEquivalent: "q"
+        )
+        quitItem.target = self
+        menu.addItem(quitItem)
+
+        item.menu = menu
+        statusItem = item
+        refreshGlobalDisableState()
+    }
+
+    @objc private func toggleGlobalDisable(_ sender: Any?) {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: crierGlobalDisabledPath) {
+            try? fm.removeItem(atPath: crierGlobalDisabledPath)
+            uiLog("global disable cleared")
+        } else {
+            try? fm.createDirectory(atPath: "/tmp/crier-agent",
+                                     withIntermediateDirectories: true)
+            fm.createFile(atPath: crierGlobalDisabledPath, contents: nil)
+            uiLog("global disable set")
+            // Hide any currently-shown panel so the user sees the toggle take
+            // effect immediately.
+            hide()
+        }
+        refreshGlobalDisableState()
+    }
+
+    @objc private func quitApp(_ sender: Any?) {
+        NSApp.terminate(nil)
+    }
+
+    private func refreshGlobalDisableState() {
+        let isDisabled = FileManager.default.fileExists(atPath: crierGlobalDisabledPath)
+        statusDisableItem?.title = isDisabled
+            ? "Enable Crier (Global)"
+            : "Disable Crier (Global)"
+        statusDisableItem?.state = isDisabled ? .on : .off
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         uiLog("applicationDidFinishLaunching — endpoint=\(endpoint)")
         installMainMenu()
+        installStatusItem()
         let view = CrierPanelView(
             state: state,
             onSubmit: { [weak self] in self?.submit() },

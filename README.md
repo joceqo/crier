@@ -2,27 +2,41 @@
 
 A native macOS popover that surfaces *any* CLI agent's last message wherever you are on screen, lets you reply by text or dictation (using whichever STT engine you want), and can be answered hands-free via an AirPods stem-tap when you're away from the keyboard.
 
-**Status:** Spec + scaffold. No runtime behavior yet — every executable in `Sources/` is a stub that prints what it would do. See [Roadmap](#roadmap) for the implementation order.
+**Status:** Working Claude Code vertical slice. The daemon, hook emitter, SwiftUI panel, reply long-poll, and tmux delivery paths are implemented; Claude Code has been manually tested. Codex, Cursor, OpenCode, and PTY-wrapped agents still need provider-specific validation before they should be treated as supported.
 
 ## Repo layout
 
 ```
-Package.swift                       Swift package, four executables
+Package.swift                       Swift package, executables + testable support modules
 Sources/
-  CrierDaemon/                      crier-daemon — local HTTP/WS server (127.0.0.1:8731)
+  CrierDaemon/                      crier-daemon — local HTTP server (127.0.0.1:8731)
+  CrierEmitCore/                    shared hook parsing / disable-state helpers
   CrierUI/                          crier-ui — floating NSPanel (LSUIElement)
   CrierEmit/                        crier-emit — hook adapter for Claude Code / Codex / Cursor
   CrierWrap/                        crier-wrap — PTY wrapper for agents with no hooks (aider, gemini-cli)
 packages/
   opencode-plugin/                  @crier/opencode-plugin — TS plugin (OpenCode requires TS)
+Tests/
+  CrierEmitCoreTests/               XCTest coverage for transcript parsing and disable-state paths
 ```
 
-Build:
+Build and test:
 
 ```bash
 swift build                                      # all four CLI/UI executables
+swift test                                       # Swift unit tests
 ( cd packages/opencode-plugin && npm i && npm run build )
 ```
+
+## Provider Status
+
+| Provider | State | Next validation |
+| --- | --- | --- |
+| Claude Code | Manually tested end-to-end with `Stop` → Crier panel → reply via hook stdout. | Add more regression fixtures from real Claude transcripts. |
+| Codex CLI | Adapter path implemented for `last_assistant_message`, not yet manually validated. | Install hooks with `codex_hooks = true`, verify `Stop` and `PermissionRequest` payloads. |
+| Cursor CLI | Shares transcript parsing with Claude/Codex-style hooks, not yet manually validated. | Verify actual `stop` payload shape and permission hook behavior. |
+| OpenCode | Plugin builds and posts/long-polls, but reply injection back into OpenCode is still TODO. | Wire `replyText` into the current OpenCode plugin/session API. |
+| Aider / Gemini / generic PTY | Planned only. `crier-wrap` is still a stub. | Implement PTY wrapper, idle detection, scrollback extraction, and named-pipe reply delivery. |
 
 ---
 
@@ -83,12 +97,12 @@ This is the single contract the overlay UI consumes. Adding a new agent = writin
 ```text
 ┌───────────────────────────────────────────────────────────────┐
 │ crier-daemon (Swift, runs at login, 127.0.0.1:8731)           │
-│   - HTTP/WS server: /event (in)  /reply (out)  /sessions (ws) │
+│   - HTTP server: /event (in)  /reply (out)  /current (poll)   │
 │   - Session registry (per session_id → reply_channel state)   │
 │   - URL scheme: crier://dictate?session=...                   │
 └───────────┬─────────────────────────────────┬─────────────────┘
             │                                 │
-   POST /event from hooks                ws/sse subscribe
+   POST /event from hooks                long-poll subscribe
             │                                 │
 ┌───────────┴─────────┐         ┌─────────────▼────────────────┐
 │ Hook adapters       │         │ crier-ui (SwiftUI panel)     │
@@ -114,7 +128,7 @@ This is the single contract the overlay UI consumes. Adding a new agent = writin
 * A daemon survives across overlay-window dismissals (events keep arriving).
 * It owns the single source of truth for "which sessions are live."
 * It's also the URL-scheme target → Apple Shortcuts / AirPods triggers can hit it without the UI being focused.
-* The UI becomes a thin client over its websocket.
+* The UI becomes a thin client over the daemon's HTTP long-poll endpoint.
 
 ### Reply channels
 
@@ -230,13 +244,13 @@ The overlay UI's dictation button uses on-device speech-to-text. Two backends pl
 
 ## Roadmap
 
-1. **`crier-daemon` HTTP/WS server** — `POST /event`, `WS /sessions`. Just route + log, no replies yet.
-2. **`crier-emit` for Claude Code** — read stdin, scrape last assistant message, POST. Most concrete agent first.
-3. **`crier-ui` skeleton** — NSPanel that pops on event, lists sessions, no reply yet.
-4. **Reply via `tmux send-keys`** — text replies first, no dictation. End-to-end loop closes here.
-5. **Apple `Speech` dictation** — default backend, fastest to integrate.
-6. **Codex + Cursor adapters** — same emit binary, per-agent branches.
-7. **OpenCode plugin** — `packages/opencode-plugin/`.
-8. **PTY wrapper (`crier-wrap`)** — Aider first.
-9. **Superwhisper / Handy passthrough backends.**
-10. **AirPods stem-tap trigger** — Apple Shortcuts → `crier://dictate?session=<id>`.
+1. **Done:** `crier-daemon` HTTP server — `POST /event`, `POST /reply`, `GET /current`, `GET /reply`.
+2. **Done:** `crier-emit` for Claude Code — read stdin, scrape last assistant message, POST, block for reply on `turn_done`.
+3. **Done:** `crier-ui` skeleton — NSPanel that pops on event, renders message markdown, and posts replies.
+4. **Done:** Text reply loop — hook stdout for Claude Code, daemon-mediated `tmux send-keys`, and HTTP long-poll primitives.
+5. **Current:** Provider validation — Codex, Cursor, and OpenCode need real hook/plugin runs.
+6. **Next:** OpenCode reply injection — feed long-polled `replyText` back into the active OpenCode session.
+7. **Next:** Apple `Speech` dictation — default backend, fastest to integrate.
+8. **Later:** PTY wrapper (`crier-wrap`) — Aider first.
+9. **Later:** Superwhisper / Handy passthrough backends.
+10. **Later:** AirPods stem-tap trigger — Apple Shortcuts → `crier://dictate?session=<id>`.
