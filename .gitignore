@@ -1,0 +1,14 @@
+.DS_Store
+.build/
+.swiftpm/
+DerivedData/
+Crier.app/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+Package.resolved
+
+node_modules/
+dist/
+*.tsbuildinfo
+.env
+.env.local

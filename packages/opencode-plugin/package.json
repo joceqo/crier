@@ -1,0 +1,23 @@
+{
+  "name": "@crier/opencode-plugin",
+  "version": "0.0.1",
+  "description": "OpenCode plugin that emits Crier events on session.idle / permission.asked",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "*"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "*",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
+  }
+}
