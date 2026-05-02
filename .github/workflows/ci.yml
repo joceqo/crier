@@ -1,0 +1,23 @@
+# Requires a runner with Swift 6.2 + macOS 26 SDK (matches Package.swift).
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build crier-emit (integration tests spawn this binary)
+        run: swift build --product crier-emit
+
+      - name: Run tests
+        run: swift test
+        env:
+          # Never run credential/network E2E in CI unless you opt in.
+          CRIER_E2E: "0"

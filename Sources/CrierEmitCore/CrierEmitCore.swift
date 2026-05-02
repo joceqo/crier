@@ -9,6 +9,14 @@ public enum CrierEmitCore {
         return extractLastAssistantMessage(transcript: raw)
     }
 
+    /// Last assistant **turn** in the JSONL transcript (scanning from the bottom).
+    ///
+    /// - String `content`, including `""`, is returned as-is so an empty final turn does not
+    ///   show the previous assistant message (stale UI).
+    /// - Array `content` with only `text` blocks joins non-empty parts; if there is at least
+    ///   one `text` block but all are empty, returns `""`.
+    /// - Assistant lines with only non-text blocks (e.g. `tool_use`) are skipped so the last
+    ///   **visible** text is used when the model ends on a tool call.
     public static func extractLastAssistantMessage(transcript: String) -> String {
         let lines = transcript.split(separator: "\n", omittingEmptySubsequences: true)
         for line in lines.reversed() {
@@ -17,14 +25,31 @@ public enum CrierEmitCore {
                   (obj["type"] as? String) == "assistant",
                   let message = obj["message"] as? [String: Any] else { continue }
 
-            if let s = message["content"] as? String, !s.isEmpty { return s }
-            if let blocks = message["content"] as? [[String: Any]] {
-                var parts: [String] = []
-                for block in blocks where (block["type"] as? String) == "text" {
-                    if let t = block["text"] as? String, !t.isEmpty { parts.append(t) }
-                }
-                if !parts.isEmpty { return parts.joined(separator: "\n") }
+            guard let rawContent = message["content"] else {
+                continue
             }
+            if rawContent is NSNull {
+                return ""
+            }
+            if let s = rawContent as? String {
+                return s
+            }
+            if let blocks = rawContent as? [[String: Any]] {
+                var textParts: [String] = []
+                var sawTextBlock = false
+                for block in blocks {
+                    guard (block["type"] as? String) == "text" else { continue }
+                    sawTextBlock = true
+                    if let t = block["text"] as? String, !t.isEmpty {
+                        textParts.append(t)
+                    }
+                }
+                if sawTextBlock {
+                    return textParts.joined(separator: "\n")
+                }
+                continue
+            }
+            continue
         }
         return ""
     }

@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import CoreGraphics
+import CrierEmitCore
 import CrierServer
 import CryptoKit
 import MarkdownToAttributedString
@@ -82,22 +83,110 @@ private func postKeystrokes(_ text: String, pressReturn: Bool = true) {
     }
 }
 
-final class CrierState: ObservableObject, @unchecked Sendable {
-    @Published var title: String = "Crier"
-    @Published var subtitle: String = ""
-    @Published var projectName: String = ""
-    @Published var agentName: String = "claude-code"
-    @Published var message: String = ""
-    @Published var replyText: String = ""
-    @Published var focusGen: Int = 0
-    @Published var showDisableDialog: Bool = false
-
-    var sessionId: String?
+/// One agent session (Claude in repo A, Codex in repo B, …). `id` matches the wire `session_id` from crier-emit.
+struct CrierSession: Identifiable, Equatable {
+    let id: String
+    var receivedAt: Date
+    var title: String
+    var eventKind: String
+    var message: String
+    var agentName: String
+    var projectName: String
+    var cwd: String?
     var requestId: String?
     var replyChannel: String?
     var replyTarget: String?
     var terminalPid: Int32?
-    var cwd: String?
+    var replyDraft: String = ""
+
+    var tabLabel: String {
+        let ag = switch agentName {
+        case "claude-code": "Claude"
+        case "codex": "Codex"
+        case "cursor": "Cursor"
+        case "opencode": "OpenCode"
+        default: String(agentName.prefix(5))
+        }
+        let p = projectName.isEmpty ? "…" : projectName
+        return "\(ag) · \(p)"
+    }
+
+    static func fromPayload(_ obj: [String: Any], id: String) -> CrierSession {
+        let cwd = obj["cwd"] as? String
+        let proj: String
+        if let c = cwd, !c.isEmpty { proj = (c as NSString).lastPathComponent }
+        else { proj = "" }
+        return CrierSession(
+            id: id,
+            receivedAt: Date(),
+            title: obj["title"] as? String ?? "Crier",
+            eventKind: obj["event"] as? String ?? "",
+            message: obj["message"] as? String ?? "",
+            agentName: obj["agent"] as? String ?? "claude-code",
+            projectName: proj,
+            cwd: cwd,
+            requestId: obj["request_id"] as? String,
+            replyChannel: obj["reply_channel"] as? String,
+            replyTarget: obj["reply_target"] as? String,
+            terminalPid: (obj["terminal_pid"] as? Int).map { Int32($0) },
+            replyDraft: ""
+        )
+    }
+}
+
+final class CrierState: ObservableObject, @unchecked Sendable {
+    @Published var sessions: [CrierSession] = []
+    @Published var selectedSessionKey: String?
+    @Published var focusGen: Int = 0
+    @Published var showDisableDialog: Bool = false
+
+    var selectedSession: CrierSession? {
+        guard let k = selectedSessionKey else { return nil }
+        return sessions.first { $0.id == k }
+    }
+
+    /// Merge or append by `session_id` so parallel agents (two Claudes, Claude+Codex, …) each keep a tab.
+    func upsertFromPayload(_ obj: [String: Any]) {
+        let sidRaw = obj["session_id"] as? String
+        let sid = (sidRaw?.isEmpty == false) ? sidRaw! : UUID().uuidString
+
+        var next = sessions
+        if let idx = next.firstIndex(where: { $0.id == sid }) {
+            let old = next[idx]
+            let newRid = obj["request_id"] as? String
+            var incoming = CrierSession.fromPayload(obj, id: sid)
+            if newRid == old.requestId { incoming.replyDraft = old.replyDraft }
+            next[idx] = incoming
+        } else {
+            next.append(CrierSession.fromPayload(obj, id: sid))
+        }
+        next.sort { $0.receivedAt > $1.receivedAt }
+        sessions = next
+        if selectedSessionKey == nil { selectedSessionKey = sid }
+        focusGen += 1
+    }
+
+    func updateReplyDraft(sessionId id: String, text: String) {
+        guard let idx = sessions.firstIndex(where: { $0.id == id }) else { return }
+        var copy = sessions
+        copy[idx].replyDraft = text
+        sessions = copy
+    }
+
+    func removeSession(id: String) {
+        sessions = sessions.filter { $0.id != id }
+        if selectedSessionKey == id { selectedSessionKey = sessions.first?.id }
+    }
+
+    func removeAllSessions() {
+        sessions.removeAll()
+        selectedSessionKey = nil
+    }
+
+    func selectSession(id: String) {
+        selectedSessionKey = id
+        focusGen += 1
+    }
 }
 
 // SwiftUI confirmation dialog mirroring SW's "Disable for this session"
@@ -292,8 +381,8 @@ struct AgentBadge: View {
                 .lineLimit(1)
                 .padding(.trailing, 2)
                 .frame(minHeight: 18, alignment: .leading)
-                .background(WindowDragRegion())
         }
+        .background(WindowDragRegion())
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
         .crierCard(cornerRadius: 100, shadowRadius: 10)
@@ -375,6 +464,41 @@ struct AgentBadge: View {
     }
 }
 
+/// Horizontal chips to pick which parallel agent/session is active for Send / Cancel / Disable.
+private struct SessionTabStrip: View {
+    @ObservedObject var state: CrierState
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(state.sessions) { sess in
+                    let selected = sess.id == state.selectedSessionKey
+                    Button {
+                        state.selectSession(id: sess.id)
+                    } label: {
+                        Text(sess.tabLabel)
+                            .font(.system(size: 11, weight: selected ? .semibold : .regular))
+                            .lineLimit(1)
+                            .foregroundStyle(.primary)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(
+                                selected ? Color.primary.opacity(0.12) : Color.clear,
+                                in: Capsule()
+                            )
+                            .overlay(
+                                Capsule()
+                                    .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
 // Renders the agent's last assistant message via NSTextView (reliable
 // drag-to-select + Cmd+C inside the non-activating panel) with the markdown
 // converted to an NSAttributedString by MarkdownToAttributedString. The
@@ -433,10 +557,91 @@ struct MessageCard: View {
     }
 
     static func renderMarkdown(_ s: String) -> NSAttributedString {
-        var styles = MarkdownStyles.default
-        styles.setBaseAttribute(.font, NSFont.systemFont(ofSize: 14))
-        styles.setBaseAttribute(.foregroundColor, NSColor.labelColor)
-        return AttributedStringFormatter.format(markdown: s, styles: styles)
+        let styles = makeStyles()
+        let opts = FormattingOptions(addCustomMarkdownElementAttributes: true)
+        let base = AttributedStringFormatter.format(markdown: s, styles: styles, options: opts)
+        let mutable = NSMutableAttributedString(attributedString: base)
+        CodeBlockSplashHighlighting.applyToLikelySwiftCodeBlocks(mutable)
+        return mutable
+    }
+
+    // Custom MarkdownStyles tuned for the overlay panel: bold readable
+    // headings, full-contrast body and list text (the library default uses
+    // dark/light grays that disappear against dark vibrancy), and a
+    // distinct dark background for code blocks.
+    static func makeStyles() -> MarkdownStyles {
+        let body = NSFont.systemFont(ofSize: 14)
+        let bodyBold = NSFont.systemFont(ofSize: 14, weight: .semibold)
+        let mono = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let monoInline = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular)
+        let codeFg = NSColor(white: 0.95, alpha: 1.0)
+        let codeBg = NSColor.black.withAlphaComponent(0.45)
+        let inlineCodeBg = NSColor.white.withAlphaComponent(0.10)
+
+        // Italic via font descriptor — not all weights have a system italic.
+        let italicDesc = body.fontDescriptor.withSymbolicTraits(.italic)
+        let italic = NSFont(descriptor: italicDesc, size: 14) ?? body
+
+        let listPara = NSMutableParagraphStyle()
+        listPara.headIndent = 18
+        listPara.firstLineHeadIndent = 0
+        listPara.paragraphSpacing = 2
+
+        let codePara = NSMutableParagraphStyle()
+        codePara.headIndent = 12
+        codePara.firstLineHeadIndent = 12
+        codePara.paragraphSpacing = 6
+        codePara.paragraphSpacingBefore = 6
+        codePara.lineHeightMultiple = 1.15
+
+        let headingPara = NSMutableParagraphStyle()
+        headingPara.paragraphSpacing = 4
+        headingPara.paragraphSpacingBefore = 6
+
+        var styles = MarkdownStyles(
+            baseAttributes: [
+                .font: body,
+                .foregroundColor: NSColor.labelColor,
+            ],
+            styleAttributes: [
+                .strong: [.font: bodyBold],
+                .emphasis: [.font: italic],
+                .strikethrough: [
+                    .strikethroughStyle: NSUnderlineStyle.single.rawValue,
+                    .strikethroughColor: NSColor.tertiaryLabelColor,
+                ],
+                .heading: [
+                    .font: NSFont.systemFont(ofSize: 18, weight: .bold),
+                    .foregroundColor: NSColor.labelColor,
+                    .paragraphStyle: headingPara,
+                ],
+                .listItem: [
+                    .font: body,
+                    .foregroundColor: NSColor.labelColor,
+                    .paragraphStyle: listPara,
+                ],
+                .unorderedList: [.paragraphStyle: listPara],
+                .orderedList: [.paragraphStyle: listPara],
+                .inlineCode: [
+                    .font: monoInline,
+                    .foregroundColor: codeFg,
+                    .backgroundColor: inlineCodeBg,
+                ],
+                .codeBlock: [
+                    .font: mono,
+                    .foregroundColor: codeFg,
+                    .backgroundColor: codeBg,
+                    .paragraphStyle: codePara,
+                ],
+                .link: [
+                    .font: body,
+                    .foregroundColor: NSColor.linkColor,
+                    .underlineStyle: NSUnderlineStyle.single.rawValue,
+                ],
+            ]
+        )
+        styles.headingPointSizes = [22, 19, 17, 15, 14, 13]
+        return styles
     }
 
     // Compute the rendered text height for our content width and clamp.
@@ -470,13 +675,23 @@ struct CrierPanelView: View {
     let onDisableSession: () -> Void
     let onContentSize: (CGSize) -> Void
 
+    private var selected: CrierSession? { state.selectedSession }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if !state.sessions.isEmpty {
+                SessionTabStrip(state: state)
+            }
+
             HStack(spacing: 8) {
-                AgentBadge(agent: state.agentName, project: state.projectName, onClose: onCancel)
+                AgentBadge(
+                    agent: selected?.agentName ?? "claude-code",
+                    project: selected?.projectName ?? "",
+                    onClose: onCancel
+                )
                 Spacer(minLength: 8)
-                if !state.subtitle.isEmpty && state.subtitle != "turn_done" {
-                    Text(state.subtitle)
+                if let kind = selected?.eventKind, !kind.isEmpty && kind != "turn_done" {
+                    Text(kind)
                         .font(.system(size: 11, weight: .medium, design: .rounded))
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 9)
@@ -489,10 +704,11 @@ struct CrierPanelView: View {
             // overlay reads as "alert + input". An empty `message` means
             // crier-emit found no last assistant line in the transcript (new
             // session, timing, or parse miss) — still show a placeholder.
+            let msg = selected?.message ?? ""
             MessageCard(
-                text: state.message.isEmpty
+                text: msg.isEmpty
                     ? "No assistant message was read from the transcript. You can still reply below."
-                    : state.message
+                    : msg
             )
 
             inputCard
@@ -526,15 +742,30 @@ struct CrierPanelView: View {
     }
 
     private var inputCard: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            TextField("Type or dictate what you want changed.",
-                      text: $state.replyText, axis: .vertical)
+        let key = state.selectedSessionKey
+        let draftEmpty = (key.flatMap { k in state.sessions.first { $0.id == k }?.replyDraft.isEmpty } ?? true)
+
+        return VStack(alignment: .leading, spacing: 0) {
+            if let k = key {
+                TextField(
+                    "Type or dictate what you want changed.",
+                    text: Binding(
+                        get: { state.sessions.first { $0.id == k }?.replyDraft ?? "" },
+                        set: { state.updateReplyDraft(sessionId: k, text: $0) }
+                    ),
+                    axis: .vertical
+                )
                 .textFieldStyle(.plain)
                 .font(.system(size: 14))
                 .lineLimit(2...8)
                 .padding(16)
                 .focused($fieldFocused)
                 .onSubmit { onSubmit() }
+            } else {
+                Text("No session")
+                    .foregroundStyle(.secondary)
+                    .padding(16)
+            }
 
             HStack(spacing: 10) {
                 Spacer()
@@ -560,8 +791,8 @@ struct CrierPanelView: View {
                     .background(.tertiary, in: Capsule())
                 }
                 .buttonStyle(.plain)
-                .disabled(state.replyText.isEmpty)
-                .opacity(state.replyText.isEmpty ? 0.5 : 1)
+                .disabled(draftEmpty)
+                .opacity(draftEmpty ? 0.5 : 1)
                 .keyboardShortcut(.return, modifiers: [.command])
             }
             .padding(.horizontal, 14)
@@ -693,6 +924,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             uiLog("global disable set")
             // Hide any currently-shown panel so the user sees the toggle take
             // effect immediately.
+            state.removeAllSessions()
             hide()
         }
         refreshGlobalDisableState()
@@ -812,25 +1044,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
     func hide() {
         panel.orderOut(nil)
-        state.replyText = ""
     }
 
-    // Esc / Dismiss: hide the panel AND release any blocking hook so Claude
-    // stops normally instead of waiting for the long-poll timeout.
+    // Esc / Dismiss: closes the current session tab; empty POST /reply so the
+    // agent does not block on the hook. Other parallel sessions stay open.
     func cancel() {
-        if let rid = state.requestId {
+        guard let s = state.selectedSession else {
+            state.removeAllSessions()
+            hide()
+            return
+        }
+        if let rid = s.requestId {
             postReply(body: ["request_id": rid, "text": ""])
         }
-        state.requestId = nil
-        hide()
+        let sid = s.id
+        state.removeSession(id: sid)
+        if state.sessions.isEmpty {
+            hide()
+        } else {
+            showPanel()
+        }
     }
 
     // Confirmed-Disable handler — wired from the SwiftUI dialog's Disable
     // button. Touches /tmp/crier-agent/disabled-<md5(cwd)> to match the
     // `/crier off` skill behavior, releases the blocking hook with an empty
-    // reply, hides the panel.
+    // reply, removes the current session tab.
     func confirmDisableSession() {
-        guard let cwd = state.cwd, !cwd.isEmpty else { return }
+        guard let s = state.selectedSession, let cwd = s.cwd, !cwd.isEmpty else { return }
         let digest = Insecure.MD5.hash(data: Data(cwd.utf8))
         let hex = digest.map { String(format: "%02x", $0) }.joined()
         let path = "/tmp/crier-agent/disabled-\(hex)"
@@ -838,11 +1079,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                                                  withIntermediateDirectories: true)
         FileManager.default.createFile(atPath: path, contents: nil)
 
-        if let rid = state.requestId {
+        if let rid = s.requestId {
             postReply(body: ["request_id": rid, "text": ""])
         }
-        state.requestId = nil
-        hide()
+        let sid = s.id
+        state.removeSession(id: sid)
+        if state.sessions.isEmpty {
+            hide()
+        } else {
+            showPanel()
+        }
     }
 
     private func postReply(body: [String: Any]) {
@@ -888,30 +1134,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         let cwd = obj["cwd"] as? String ?? "?"
         uiLog("handleEvent — kind=\(kind) agent=\(agent) message=\(messageLen)chars cwd=\(cwd)")
         if kind == "dismiss" {
-            hide()
+            if let sid = obj["session_id"] as? String, !sid.isEmpty {
+                state.removeSession(id: sid)
+            } else {
+                state.removeAllSessions()
+            }
+            if state.sessions.isEmpty {
+                hide()
+            } else {
+                showPanel()
+            }
             return
         }
-        state.title = obj["title"] as? String ?? "Crier"
-        state.subtitle = kind
-        state.message = obj["message"] as? String ?? ""
-        state.agentName = obj["agent"] as? String ?? "claude-code"
-        if let cwd = obj["cwd"] as? String, !cwd.isEmpty {
-            state.projectName = (cwd as NSString).lastPathComponent
-        } else {
-            state.projectName = ""
+
+        state.upsertFromPayload(obj)
+        if CrierEmptyMessageDiagnostic.shouldLogEmptyMessage(event: kind),
+           CrierEmptyMessageDiagnostic.isEffectivelyEmptyMessage(obj["message"] as? String) {
+            var rec: [String: Any] = [
+                "ts": CrierEmptyMessageDiagnostic.nowTS(),
+                "kind": "empty_message_panel",
+                "source": "crier-ui",
+                "agent": agent,
+                "event": kind,
+                "session_id": obj["session_id"] as? String ?? "?",
+                "cwd": cwd,
+            ]
+            if let rid = obj["request_id"] as? String { rec["request_id"] = rid }
+            rec["payload_keys"] = obj.keys.sorted().map { $0 }
+            if let tp = obj["transcript_path"] as? String, !tp.isEmpty { rec["transcript_path"] = tp }
+            rec["crier_ui_log"] = (NSHomeDirectory() as NSString).appendingPathComponent(".claude/crier-ui.log")
+            rec["note"] = "Panel showed the transcript placeholder; correlate with empty_assistant_extract / empty_message_event lines with nearby ts."
+            CrierEmptyMessageDiagnostic.append(record: rec)
         }
-        state.cwd = obj["cwd"] as? String
-        state.sessionId = obj["session_id"] as? String
-        state.requestId = obj["request_id"] as? String
-        state.replyChannel = obj["reply_channel"] as? String
-        state.replyTarget = obj["reply_target"] as? String
-        if let tp = obj["terminal_pid"] as? Int { state.terminalPid = Int32(tp) } else { state.terminalPid = nil }
-        state.focusGen += 1
         showPanel()
     }
 
     func submit() {
-        let text = state.replyText
+        guard let s = state.selectedSession else { return }
+        let text = s.replyDraft
         guard !text.isEmpty else { return }
 
         // Resolve the keystroke target with three layers of fallback:
@@ -922,16 +1182,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         //     known offenders like Superwhisper.
         //  3. NSWorkspace.frontmostApplication — last resort.
         let targetApp: NSRunningApplication? = {
-            if let pid = state.terminalPid, pid > 0,
+            if let pid = s.terminalPid, pid > 0,
                let app = NSRunningApplication(processIdentifier: pid) { return app }
             return lastTerminalApp ?? NSWorkspace.shared.frontmostApplication
         }()
 
         var body: [String: Any] = ["text": text]
-        if let s = state.sessionId    { body["session_id"]  = s }
-        if let r = state.requestId    { body["request_id"]  = r }
-        if let c = state.replyChannel { body["channel"]     = c }
-        if let t = state.replyTarget  { body["target"]      = t }
+        body["session_id"] = s.id
+        if let r = s.requestId { body["request_id"] = r }
+        if let c = s.replyChannel { body["channel"] = c }
+        if let t = s.replyTarget { body["target"] = t }
 
         if let url = URL(string: "\(endpoint)/reply"),
            let data = try? JSONSerialization.data(withJSONObject: body) {
@@ -942,8 +1202,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             URLSession.shared.dataTask(with: req).resume()
         }
 
-        let channel = state.replyChannel
-        hide()
+        let channel = s.replyChannel
+        let keystrokePath = channel != "hook-stdout" && channel != "tmux" && channel != "http-poll"
+        let removedId = s.id
+        state.removeSession(id: removedId)
+        if state.sessions.isEmpty {
+            hide()
+        } else {
+            showPanel()
+        }
 
         // Reply delivery routing:
         //   hook-stdout → crier-emit is blocking on /reply; daemon wakes it
@@ -955,7 +1222,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         //   http-poll   → daemon wakes the OpenCode plugin's long-poll
         //   anything else (incl. nil) → CGEvent into the previously-frontmost
         //                 app. Legacy fallback for events without request_id.
-        if channel != "hook-stdout" && channel != "tmux" && channel != "http-poll" {
+        if keystrokePath {
             targetApp?.activate(options: [])
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
                 postKeystrokes(text)

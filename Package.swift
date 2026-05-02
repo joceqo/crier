@@ -16,11 +16,13 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
         .package(url: "https://github.com/zats/permiso.git", branch: "main"),
         .package(url: "https://github.com/madebywindmill/MarkdownToAttributedString.git", branch: "main"),
+        .package(url: "https://github.com/JohnSundell/Splash.git", from: "0.16.0"),
     ],
     targets: [
         .target(
             name: "CrierServer",
             dependencies: [
+                "CrierEmitCore",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
@@ -39,9 +41,11 @@ let package = Package(
         .executableTarget(
             name: "CrierUI",
             dependencies: [
+                "CrierEmitCore",
                 "CrierServer",
                 .product(name: "Permiso", package: "permiso"),
                 .product(name: "MarkdownToAttributedString", package: "MarkdownToAttributedString"),
+                .product(name: "Splash", package: "Splash"),
             ],
             path: "Sources/CrierUI"
         ),
@@ -55,6 +59,21 @@ let package = Package(
             name: "CrierEmitCoreTests",
             dependencies: ["CrierEmitCore"],
             path: "Tests/CrierEmitCoreTests"
+        ),
+        .testTarget(
+            name: "CrierServerTests",
+            dependencies: ["CrierServer"],
+            path: "Tests/CrierServerTests"
+        ),
+        .testTarget(
+            name: "CrierEmitIntegrationTests",
+            dependencies: ["CrierServer"],
+            path: "Tests/CrierEmitIntegrationTests"
+        ),
+        .testTarget(
+            name: "CrierE2ETests",
+            dependencies: ["CrierServer"],
+            path: "Tests/CrierE2ETests"
         ),
     ]
 )

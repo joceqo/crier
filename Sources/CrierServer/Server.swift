@@ -2,6 +2,7 @@ import Foundation
 import NIOCore
 import NIOPosix
 import NIOHTTP1
+import CrierEmitCore
 
 // CrierServer — local HTTP server reused by `crier-daemon` (CLI) and `Crier.app`
 // (UI process embeds it so launching the app starts the server in-process).
@@ -27,27 +28,45 @@ nonisolated(unsafe) private let isoFormatter: ISO8601DateFormatter = {
 
 // MARK: - EventHub
 
-// One-shot broadcaster: every connected GET /current waiter is signaled when
-// a new event arrives. Intentionally does NOT keep history — each waiter sees
-// the *next* event published after they registered. The UI just runs the
-// long-poll in a loop.
+// One-shot broadcaster: connected GET /current waiters are all signaled with
+// the same payload when a new event arrives. If nobody is waiting, the event
+// is queued so a poller that starts slightly later (e.g. UI still showing the
+// previous blocking panel) does not miss it. Queue is bounded — under flood,
+// oldest events drop first.
 private final class EventHub: @unchecked Sendable {
     static let shared = EventHub()
     private let lock = NSLock()
     private var waiters: [UUID: EventLoopPromise<Data?>] = [:]
+    private var eventQueue: [Data] = []
+    private let maxQueuedEvents = 32
 
     func publish(_ data: Data) {
         lock.lock()
         let snapshot = waiters
         waiters.removeAll()
+        if snapshot.isEmpty {
+            if eventQueue.count >= maxQueuedEvents {
+                eventQueue.removeFirst()
+            }
+            eventQueue.append(data)
+            lock.unlock()
+            return
+        }
         lock.unlock()
-        for (_, p) in snapshot { p.succeed(data) }
+        for (_, p) in snapshot {
+            p.succeed(data)
+        }
     }
 
     func awaitNext(eventLoop: EventLoop, timeoutSeconds: Int) -> EventLoopFuture<Data?> {
+        lock.lock()
+        if !eventQueue.isEmpty {
+            let data = eventQueue.removeFirst()
+            lock.unlock()
+            return eventLoop.makeSucceededFuture(data)
+        }
         let id = UUID()
         let promise = eventLoop.makePromise(of: Data?.self)
-        lock.lock()
         waiters[id] = promise
         lock.unlock()
 
@@ -221,6 +240,27 @@ private final class CrierHTTPHandler: ChannelInboundHandler {
         }
         FileHandle.standardOutput.write(Data(line.utf8))
 
+        if CrierEmptyMessageDiagnostic.shouldLogEmptyMessage(event: event),
+           CrierEmptyMessageDiagnostic.isEffectivelyEmptyMessage(message) {
+            var rec: [String: Any] = [
+                "ts": isoFormatter.string(from: Date()),
+                "kind": "empty_message_event",
+                "source": "crier-server",
+                "agent": agent,
+                "event": event,
+                "session_id": session,
+                "cwd": cwd,
+            ]
+            if let rid = requestId { rec["request_id"] = rid }
+            if let rc = replyChannel { rec["reply_channel"] = rc }
+            if let rt = replyTarget { rec["reply_target"] = rt }
+            if let t = parsed["title"] as? String, !t.isEmpty { rec["title"] = t }
+            if let tp = parsed["transcript_path"] as? String, !tp.isEmpty { rec["transcript_path"] = tp }
+            rec["payload_keys"] = parsed.keys.sorted().map { $0 }
+            rec["note"] = "POST /event had empty message; crier-ui shows the transcript placeholder for this session."
+            CrierEmptyMessageDiagnostic.append(record: rec)
+        }
+
         EventHub.shared.publish(body)
     }
 
@@ -259,7 +299,10 @@ private final class CrierHTTPHandler: ChannelInboundHandler {
             }
         }
 
-        if channel == "tmux", let target, !text.isEmpty {
+        // Tmux delivery only for non-blocking events (no request_id).
+        // Blocking events (turn_done) use the hook-stdout path via ReplyHub;
+        // injecting keystrokes on top would double-submit the reply.
+        if requestId == nil, channel == "tmux", let target, !text.isEmpty {
             DispatchQueue.global(qos: .userInitiated).async {
                 Self.runTmuxReply(target: target, text: text)
             }
@@ -271,13 +314,18 @@ private final class CrierHTTPHandler: ChannelInboundHandler {
         literal.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         literal.arguments = ["tmux", "send-keys", "-t", target, "-l", "--", text]
         literal.standardOutput = Pipe(); literal.standardError = Pipe()
-        try? literal.run(); literal.waitUntilExit()
+        do { try literal.run(); literal.waitUntilExit() } catch {
+            FileHandle.standardError.write(Data("crier-server: tmux send-keys (text) failed: \(error)\n".utf8))
+            return
+        }
 
         let enter = Process()
         enter.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         enter.arguments = ["tmux", "send-keys", "-t", target, "Enter"]
         enter.standardOutput = Pipe(); enter.standardError = Pipe()
-        try? enter.run(); enter.waitUntilExit()
+        do { try enter.run(); enter.waitUntilExit() } catch {
+            FileHandle.standardError.write(Data("crier-server: tmux send-keys (Enter) failed: \(error)\n".utf8))
+        }
     }
 
     private func handleGetReply(uri: String, eventLoop: EventLoop) -> EventLoopFuture<(HTTPResponseStatus, String, String)> {

@@ -35,7 +35,7 @@ swift test                                       # Swift unit tests
 | Claude Code | Manually tested end-to-end with `Stop` → Crier panel → reply via hook stdout. | Add more regression fixtures from real Claude transcripts. |
 | Codex CLI | Adapter path implemented for `last_assistant_message`, not yet manually validated. | Install hooks with `codex_hooks = true`, verify `Stop` and `PermissionRequest` payloads. |
 | Cursor CLI | Shares transcript parsing with Claude/Codex-style hooks, not yet manually validated. | Verify actual `stop` payload shape and permission hook behavior. |
-| OpenCode | Plugin builds and posts/long-polls, but reply injection back into OpenCode is still TODO. | Wire `replyText` into the current OpenCode plugin/session API. |
+| OpenCode | Plugin posts, long-polls `/reply`, then calls `session.promptAsync` (idle) or the permissions endpoint (tool approval). | Exercise with real projects; tighten permission text→`once`/`always`/`reject` mapping if needed. |
 | Aider / Gemini / generic PTY | Planned only. `crier-wrap` is still a stub. | Implement PTY wrapper, idle detection, scrollback extraction, and named-pipe reply delivery. |
 
 ---
@@ -194,10 +194,24 @@ await fetch("http://127.0.0.1:8731/event", {
 // Block until the UI posts /reply for this request_id (or 300s timeout).
 const res = await fetch(`http://127.0.0.1:8731/reply?request_id=${requestId}&wait=300`)
 const replyText = res.status === 200 ? await res.text() : null
-// → feed replyText back to the OpenCode session as the next prompt
+// → plugin calls OpenCode SDK: session.promptAsync (turn) or postSessionIdPermissionsPermissionId (approval)
 ```
 
 User opts in by adding `"@crier/opencode-plugin"` to `opencode.json`'s `plugin` array.
+
+If the panel shows **“No assistant message was read from the transcript”** for OpenCode, the plugin could not read text from `session.messages` (wrong workspace path, race right after `session.idle`, or the last turn only had tool/output parts). Rebuild/relink the plugin, then set `CRIER_OPENCODE_DEBUG=1` when starting OpenCode to log `session.messages` / `session.message` failures on stderr. Permission prompts use the permission **title** as `message` instead of transcript text.
+
+### Empty-message tracing (`~/.claude/crier-empty-message.jsonl`)
+
+For `turn_done`, `needs_permission`, and `needs_input`, if `message` is empty you get **one JSON object per line** (easy to feed to another model):
+
+| `kind` | `source` | What it captures |
+| --- | --- | --- |
+| `empty_assistant_extract` | `crier-emit` | Transcript/hook side; may include `transcript_tail_jsonl_lines` (last lines of the jsonl) and `stdin_json_keys`. |
+| `empty_message_event` | `crier-server` | The `POST /event` body summary (`payload_keys`, `session_id`, `request_id`, …). |
+| `empty_message_panel` | `crier-ui` | The overlay actually drew that event; `crier_ui_log` points at `~/.claude/crier-ui.log`. |
+
+Correlate rows by `ts`, `session_id`, and `request_id`.
 
 ### Cursor CLI (`~/.cursor/hooks.json`)
 

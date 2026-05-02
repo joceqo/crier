@@ -3,8 +3,116 @@ import { randomUUID } from "node:crypto"
 
 const ENDPOINT = process.env.CRIER_ENDPOINT ?? "http://127.0.0.1:8731"
 const REPLY_TIMEOUT_SEC = Number(process.env.CRIER_REPLY_TIMEOUT ?? 300)
+const OPENCODE_DEBUG = process.env.CRIER_OPENCODE_DEBUG === "1" || process.env.CRIER_OPENCODE_DEBUG === "true"
 
-export const Crier: Plugin = async ({ directory }) => ({
+function debugLog(...args: unknown[]) {
+  if (OPENCODE_DEBUG) console.error("[crier/opencode-plugin]", ...args)
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+function readSessionId(e: { properties?: Record<string, unknown> }): string | undefined {
+  const p = e.properties
+  if (!p) return undefined
+  const a = p.sessionID ?? p.sessionId
+  return typeof a === "string" && a.length > 0 ? a : undefined
+}
+
+function normalizeRole(role: string | undefined): string {
+  return String(role ?? "").toLowerCase()
+}
+
+/** Collect user-visible text from message parts (OpenCode part shapes vary by version). */
+function extractFromParts(parts: any[] | undefined): string {
+  if (!parts?.length) return ""
+  const bits: string[] = []
+  for (const p of parts) {
+    if (!p) continue
+    if (p.type === "text" && typeof p.text === "string") bits.push(p.text)
+    else if (p.type === "reasoning" && typeof p.text === "string") bits.push(p.text)
+    else if (p.type === "tool" && p.state?.status === "completed" && typeof p.state.output === "string")
+      bits.push(p.state.output)
+  }
+  return bits.join("\n\n").trim()
+}
+
+/**
+ * Latest assistant plain text for the Crier panel. Tries several `directory` query
+ * variants (OpenCode uses directory vs worktree inconsistently), retries briefly to
+ * beat session.idle vs persistence races, and falls back to per-message fetch when
+ * the list endpoint returns empty parts.
+ */
+async function lastAssistantPlainText(
+  client: {
+    session: {
+      messages: (opts: any) => Promise<any>
+      message: (opts: any) => Promise<any>
+    }
+  },
+  sessionId: string,
+  directory: string,
+  worktree: string,
+): Promise<string> {
+  const queryDirs = [...new Set([directory, worktree].filter((d) => typeof d === "string" && d.length > 0))]
+  const queryVariants: (Record<string, string> | undefined)[] = queryDirs.map((directory) => ({ directory }))
+  queryVariants.push(undefined)
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) await sleep(120)
+
+    for (const query of queryVariants) {
+      const res = await client.session.messages({ path: { id: sessionId }, query })
+      if (res.error) {
+        debugLog("session.messages error", { sessionId, query, error: res.error })
+        continue
+      }
+      const rows = res.data as Array<{ info: { role: string; id?: string }; parts: any[] }> | undefined
+      if (!rows?.length) {
+        debugLog("session.messages empty list", { sessionId, query, attempt })
+        continue
+      }
+
+      for (let i = rows.length - 1; i >= 0; i--) {
+        const row = rows[i]
+        if (normalizeRole(row.info.role) !== "assistant") continue
+
+        let t = extractFromParts(row.parts)
+        if (!t && row.info.id) {
+          try {
+            const one = await client.session.message({
+              path: { id: sessionId, messageID: row.info.id },
+              query,
+            })
+            if (one.error) debugLog("session.message error", one.error)
+            else t = extractFromParts(one.data?.parts)
+          } catch (err) {
+            debugLog("session.message threw", err)
+          }
+        }
+        if (t) return t
+      }
+    }
+  }
+
+  debugLog("no assistant text after retries", { sessionId })
+  return ""
+}
+
+function permissionSummary(e: any): string {
+  const t = e.properties?.title
+  return typeof t === "string" && t.trim().length > 0 ? t.trim() : "OpenCode needs your approval for a tool or action."
+}
+
+/** Map free-text UI reply to OpenCode permission API response. */
+function mapPermissionTextToResponse(text: string): "once" | "always" | "reject" | null {
+  const t = text.toLowerCase().trim()
+  if (!t) return null
+  if (/^(reject|deny|no)\b/.test(t) || t === "n") return "reject"
+  if (/\b(always|all|forever|every)\b/.test(t)) return "always"
+  return "once"
+}
+
+export const Crier: Plugin = async ({ directory, worktree, client }) => ({
   event: async ({ event }) => {
     // event.type is a union of well-known SDK names; we widen to any to
     // tolerate naming drift between OpenCode versions. The SW plugin does
@@ -13,11 +121,29 @@ export const Crier: Plugin = async ({ directory }) => ({
     const e = event as any
     let kind: "turn_done" | "needs_permission" | null = null
     if (e.type === "session.idle") kind = "turn_done"
-    else if (e.type === "permission.asked" || e.type === "permission.ask") kind = "needs_permission"
+    else if (
+      e.type === "permission.asked" ||
+      e.type === "permission.ask" ||
+      e.type === "permission.updated"
+    ) {
+      kind = "needs_permission"
+    }
     if (!kind) return
 
     const requestId = randomUUID()
-    const sessionId = e.properties?.sessionID ?? e.properties?.sessionId
+    const sessionId = readSessionId(e)
+    if (!sessionId) return
+
+    let message = ""
+    if (kind === "needs_permission") {
+      message = permissionSummary(e)
+    } else {
+      try {
+        message = await lastAssistantPlainText(client, sessionId, directory, worktree)
+      } catch {
+        message = ""
+      }
+    }
 
     try {
       await fetch(`${ENDPOINT}/event`, {
@@ -29,6 +155,8 @@ export const Crier: Plugin = async ({ directory }) => ({
           request_id: requestId,
           session_id: sessionId,
           cwd: directory,
+          message,
+          title: "OpenCode",
           reply_channel: "http-poll",
           reply_target: requestId,
           ts: new Date().toISOString(),
@@ -51,12 +179,43 @@ export const Crier: Plugin = async ({ directory }) => ({
     } catch {
       return
     }
-    if (!replyText) return
+    if (replyText == null) return
+    const trimmed = replyText.trim()
+    if (!trimmed) return
 
-    // TODO: feed `replyText` back into the OpenCode session as the next prompt.
-    // SW's @superwhisper/opencode does this through normalize.ts + OpenCode's
-    // session API; the exact call depends on the OpenCode plugin API version
-    // shipping at the time. Left as the next step once we exercise the loop.
+    const query = directory ? { directory } : undefined
+
+    if (kind === "needs_permission") {
+      const permId = e.properties?.id
+      if (typeof permId === "string" && permId.length > 0) {
+        const response = mapPermissionTextToResponse(trimmed)
+        if (response) {
+          try {
+            await client.postSessionIdPermissionsPermissionId({
+              path: { id: sessionId, permissionID: permId },
+              query,
+              body: { response },
+            })
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+      return
+    }
+
+    // turn_done — inject user text as the next user message and resume the agent.
+    try {
+      await client.session.promptAsync({
+        path: { id: sessionId },
+        query,
+        body: {
+          parts: [{ type: "text", text: trimmed }],
+        },
+      })
+    } catch {
+      /* ignore */
+    }
   },
 })
 

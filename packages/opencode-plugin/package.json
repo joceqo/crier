@@ -10,7 +10,8 @@
   ],
   "scripts": {
     "build": "tsc",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "smoke": "npm run build && node scripts/crier-plugin-smoke.mjs"
   },
   "peerDependencies": {
     "@opencode-ai/plugin": "*"

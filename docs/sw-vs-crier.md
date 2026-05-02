@@ -87,7 +87,12 @@ Both plugins block synchronously waiting for the user's reply. SW's does more wo
 - `extractFullText`, `extractSummary`, `isEndTurn` — message-shape inspection
 - `parseQuestionResponse`, `normalizeQuestions`, `normalizePermissionReply` — non-trivial reply normalization to feed back into OpenCode's session API
 
-Crier's plugin currently does the POST + long-poll only. The "feed `replyText` back into the OpenCode session" step is a TODO — needs OpenCode-API-version-specific code analogous to SW's normalize.ts. We left it explicit in `packages/opencode-plugin/src/index.ts`.
+Crier's plugin POSTs `/event`, long-polls `GET /reply`, then delivers the reply:
+
+- **`session.idle`:** `client.session.promptAsync` with a single `{ type: "text", text }` part (next user turn).
+- **Permission-related events** (incl. `permission.updated`): when `properties.id` is the pending permission, maps the UI string to `once` / `always` / `reject` and calls `client.postSessionIdPermissionsPermissionId`.
+
+Older OpenCode versions that only emit `permission.asked` / `permission.ask` remain supported. Refine text→permission mapping as real usage surfaces edge cases (see Superwhisper's `normalize.ts` for a fuller reference).
 
 ### 9. Audio cues
 
