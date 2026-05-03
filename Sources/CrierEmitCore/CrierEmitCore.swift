@@ -153,6 +153,24 @@ public enum CrierEmitCore {
         try? FileManager.default.removeItem(atPath: sessionDisabledPath(forFullId: fullId))
     }
 
+    // MARK: - Summary affordance gating
+    //
+    // Pure-logic helpers used by the CrierUI overlay's "Summarize" chip.
+    // The actual on-device summarization lives in CrierUI/MessageSummary.swift
+    // because it depends on FoundationModels; this layer only decides
+    // whether to offer the affordance, so it stays unit-testable.
+
+    /// Minimum assistant message length (in characters) before the
+    /// "Summarize" chip is offered. Below this, the message itself is
+    /// short enough that an extra summary card adds no value.
+    public static let summarizeMinimumChars = 400
+
+    /// True iff the chip should be shown for a message of the given
+    /// length and current model availability.
+    public static func shouldOfferSummary(textLength: Int, modelAvailable: Bool) -> Bool {
+        textLength >= summarizeMinimumChars && modelAvailable
+    }
+
     /// (fullSessionId, cwdRecorded) for every session currently disabled.
     /// `cwd` may be empty for files written before content-tracking landed.
     public static func disabledSessions() -> [(fullId: String, cwd: String)] {

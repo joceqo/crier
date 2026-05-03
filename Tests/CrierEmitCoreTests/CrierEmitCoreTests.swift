@@ -99,4 +99,40 @@ final class CrierEmitCoreTests: XCTestCase {
         if exists { try? FileManager.default.removeItem(atPath: flagPath) }
         XCTAssertFalse(CrierEmitCore.isGloballyDisabled())
     }
+
+    // MARK: - Summary affordance gating
+
+    func testSummaryThresholdConstantIs400() {
+        XCTAssertEqual(CrierEmitCore.summarizeMinimumChars, 400)
+    }
+
+    func testShouldOfferSummaryRequiresModelAvailable() {
+        XCTAssertFalse(
+            CrierEmitCore.shouldOfferSummary(textLength: 1000, modelAvailable: false),
+            "long text + no model → no chip"
+        )
+        XCTAssertTrue(
+            CrierEmitCore.shouldOfferSummary(textLength: 1000, modelAvailable: true),
+            "long text + model available → chip"
+        )
+    }
+
+    func testShouldOfferSummaryRespectsLengthThreshold() {
+        XCTAssertFalse(
+            CrierEmitCore.shouldOfferSummary(textLength: 0, modelAvailable: true),
+            "empty text never gets a chip"
+        )
+        XCTAssertFalse(
+            CrierEmitCore.shouldOfferSummary(textLength: 399, modelAvailable: true),
+            "just below threshold → no chip"
+        )
+        XCTAssertTrue(
+            CrierEmitCore.shouldOfferSummary(textLength: 400, modelAvailable: true),
+            "exactly at threshold → chip"
+        )
+        XCTAssertTrue(
+            CrierEmitCore.shouldOfferSummary(textLength: 401, modelAvailable: true),
+            "just above threshold → chip"
+        )
+    }
 }

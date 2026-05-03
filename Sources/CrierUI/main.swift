@@ -888,11 +888,15 @@ struct CrierPanelView: View {
             // crier-emit found no last assistant line in the transcript (new
             // session, timing, or parse miss) — still show a placeholder.
             let msg = selected?.message ?? ""
-            MessageCard(
+            // `id(msg)` resets the wrapper's @State (summary cache, loading
+            // flag) when the message changes, so the next turn starts fresh
+            // instead of rendering a stale summary.
+            MessageWithOptionalSummary(
                 text: msg.isEmpty
                     ? "No assistant message was read from the transcript. You can still reply below."
                     : msg
             )
+            .id(msg)
 
             inputCard
                 .crierCard(cornerRadius: 16)
