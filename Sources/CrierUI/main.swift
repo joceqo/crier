@@ -3,7 +3,6 @@ import ApplicationServices
 import CoreGraphics
 import CrierEmitCore
 import CrierServer
-import CryptoKit
 import MarkdownToAttributedString
 import Permiso
 import SwiftUI
@@ -189,29 +188,51 @@ final class CrierState: ObservableObject, @unchecked Sendable {
     }
 }
 
-// SwiftUI confirmation dialog mirroring SW's "Disable for this session"
-// styling: light material card, pill-shaped Cancel + destructive Disable
-// buttons, body text with `/crier on` styled as a code chip.
+// Confirmation dialog shown when the user clicks the badge X. Three exits:
+// - top-right X: dismiss the dialog only (panel stays exactly as it was).
+// - "Leave": close the panel for this turn — agent gets an empty reply,
+//   next turn pops the panel again.
+// - "Disable": silence this whole conversation; re-enable from the
+//   menu-bar megaphone → Conversations…
 struct DisableSessionDialog: View {
-    let onConfirm: () -> Void
-    let onCancel: () -> Void
+    let onConfirm: () -> Void   // Disable
+    let onLeave: () -> Void     // Leave (this turn)
+    let onCancel: () -> Void    // X / backdrop tap (just close the dialog)
 
     var body: some View {
         ZStack {
-            Color.black.opacity(0.35)
+            // Transparent tap-to-dismiss layer. We used to dim the panel
+            // (Color.black.opacity 0.35) but that bled outside the panel
+            // and over the terminal underneath, making the dialog feel
+            // heavier than the small choice it represents. The card's
+            // shadow already separates it from the panel content.
+            Color.clear
+                .contentShape(Rectangle())
                 .ignoresSafeArea()
                 .onTapGesture { onCancel() }
 
             VStack(alignment: .leading, spacing: 14) {
-                Text("Disable Crier for this session?")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.primary)
+                HStack(alignment: .top) {
+                    Text("Disable Crier for this conversation?")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.primary)
+                    Spacer(minLength: 8)
+                    Button(action: onCancel) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(.primary)
+                            .frame(width: 20, height: 20)
+                            .background(.quaternary, in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .keyboardShortcut(.cancelAction)
+                }
 
                 bodyText
 
                 HStack(spacing: 12) {
-                    Button(action: onCancel) {
-                        Text("Cancel")
+                    Button(action: onLeave) {
+                        Text("Leave")
                             .font(.system(size: 13, weight: .medium))
                             .foregroundStyle(.primary)
                             .frame(maxWidth: .infinity)
@@ -239,16 +260,174 @@ struct DisableSessionDialog: View {
     }
 
     private var bodyText: Text {
-        let intro = Text("Crier won't pop a panel for the rest of this session. To re-enable, run ")
+        Text("Leave closes the panel for this turn — Crier pops again on the next message. Disable silences this conversation; re-enable from the menu-bar megaphone → Conversations…")
             .foregroundStyle(.secondary)
             .font(.system(size: 13))
-        let cmd = Text("/crier on")
-            .font(.system(size: 12.5, design: .monospaced).weight(.medium))
-            .foregroundStyle(.blue)
-        let outro = Text(" in the terminal.")
-            .foregroundStyle(.secondary)
-            .font(.system(size: 13))
-        return intro + cmd + outro
+    }
+}
+
+// Standalone window opened from the menu-bar status item. Lists every
+// conversation we currently know about — "Active" rows are sessions whose
+// panel is (or was just) showing; "Disabled" rows come from the on-disk
+// `/tmp/crier-agent/disabled-<md5(cwd)>` flag files written by the
+// `/crier off` skill or the badge X dialog. Each row's switch flips that
+// flag, which is the same mechanism `crier-emit` checks before posting an
+// event.
+//
+// The "Settings" section is intentionally a placeholder until we have real
+// per-app preferences to expose.
+struct ConversationsView: View {
+    @ObservedObject var state: CrierState
+    @State private var disabledCwdKnown: [String] = []
+    @State private var disabledCwdUnknown: [String] = []
+    @State private var disabledSessions: [(fullId: String, cwd: String)] = []
+
+    var body: some View {
+        List {
+            Section("Active conversations") {
+                if state.sessions.isEmpty {
+                    Text("No active conversations.")
+                        .foregroundStyle(.secondary)
+                        .font(.system(size: 12))
+                } else {
+                    ForEach(state.sessions, id: \.id) { s in
+                        ConversationRow(
+                            title: rowTitle(for: s),
+                            subtitle: rowSubtitle(for: s),
+                            enabled: isActiveEnabled(session: s),
+                            onToggle: { toggleActive(session: s) }
+                        )
+                    }
+                }
+            }
+
+            Section("Disabled conversations (not active)") {
+                let inactive = disabledSessions.filter { d in
+                    !state.sessions.contains { $0.id == d.fullId }
+                }
+                if inactive.isEmpty {
+                    Text("None.")
+                        .foregroundStyle(.secondary)
+                        .font(.system(size: 12))
+                } else {
+                    ForEach(inactive, id: \.fullId) { d in
+                        ConversationRow(
+                            title: d.cwd.isEmpty ? d.fullId : d.cwd,
+                            subtitle: d.cwd.isEmpty ? "Disabled" : "Disabled · \(d.fullId)",
+                            enabled: false,
+                            onToggle: { CrierEmitCore.clearSessionDisabled(d.fullId); reload() }
+                        )
+                    }
+                }
+            }
+
+            Section("Disabled projects (whole cwd)") {
+                let inactiveCwds = disabledCwdKnown.filter { d in
+                    !state.sessions.contains { $0.cwd == d }
+                }
+                if inactiveCwds.isEmpty && disabledCwdUnknown.isEmpty {
+                    Text("None.")
+                        .foregroundStyle(.secondary)
+                        .font(.system(size: 12))
+                } else {
+                    ForEach(inactiveCwds, id: \.self) { cwd in
+                        ConversationRow(
+                            title: cwd,
+                            subtitle: "Disabled (project)",
+                            enabled: false,
+                            onToggle: { CrierEmitCore.clearCwdDisabled(cwd); reload() }
+                        )
+                    }
+                    if !disabledCwdUnknown.isEmpty {
+                        Text("\(disabledCwdUnknown.count) older flag file(s) without recorded path. Run /crier on in the relevant project to clear.")
+                            .foregroundStyle(.secondary)
+                            .font(.system(size: 11))
+                    }
+                }
+            }
+
+            Section("Settings") {
+                Text("More options coming soon.")
+                    .foregroundStyle(.secondary)
+                    .font(.system(size: 12))
+            }
+        }
+        .listStyle(.sidebar)
+        .frame(minWidth: 460, minHeight: 460)
+        .onAppear { reload() }
+        .onChange(of: state.sessions.count) { _, _ in reload() }
+    }
+
+    private func rowTitle(for s: CrierSession) -> String {
+        if !s.projectName.isEmpty { return s.projectName }
+        if let cwd = s.cwd, !cwd.isEmpty { return cwd }
+        return s.agentName
+    }
+
+    private func rowSubtitle(for s: CrierSession) -> String {
+        let parts: [String] = [s.agentName, s.cwd ?? ""].filter { !$0.isEmpty }
+        return parts.joined(separator: " · ")
+    }
+
+    private func isActiveEnabled(session s: CrierSession) -> Bool {
+        if disabledSessions.contains(where: { $0.fullId == s.id }) { return false }
+        if let cwd = s.cwd, !cwd.isEmpty, disabledCwdKnown.contains(cwd) { return false }
+        return true
+    }
+
+    /// Active-row toggle. If the session is currently disabled (by either
+    /// flag), clear both so flipping the switch always re-enables. If it's
+    /// currently enabled, set the per-session flag (cwd-wide disable lives
+    /// behind `/crier off` only).
+    private func toggleActive(session s: CrierSession) {
+        let cwd = s.cwd ?? ""
+        if isActiveEnabled(session: s) {
+            CrierEmitCore.setSessionDisabled(s.id, cwd: cwd)
+        } else {
+            CrierEmitCore.clearSessionDisabled(s.id)
+            if !cwd.isEmpty { CrierEmitCore.clearCwdDisabled(cwd) }
+        }
+        reload()
+    }
+
+    private func reload() {
+        let cwds = CrierEmitCore.disabledCwds()
+        disabledCwdKnown = cwds.known
+        disabledCwdUnknown = cwds.unknownDigests
+        disabledSessions = CrierEmitCore.disabledSessions()
+    }
+}
+
+private struct ConversationRow: View {
+    let title: String
+    let subtitle: String
+    let enabled: Bool
+    let onToggle: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 13, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            Spacer(minLength: 8)
+            Toggle("", isOn: Binding(
+                get: { enabled },
+                set: { _ in onToggle() }
+            ))
+            .toggleStyle(.switch)
+            .labelsHidden()
+        }
+        .padding(.vertical, 2)
     }
 }
 
@@ -344,10 +523,12 @@ struct Keycap: View {
 }
 
 // Top badge: brand icon (lobe-icons) + project title. Drag the title (or the
-// padded area beside it) to move the panel. The icon is the close affordance:
-// hover morphs to X, click closes. Clicks on the title area do nothing — only
-// drag-to-move — so users don't accidentally dismiss the panel when reaching
-// for the drag handle.
+// padded area beside it) to move the panel. The icon is the disable affordance:
+// hover morphs to X, click opens the "Disable Crier for this session?" dialog
+// (mirrors Superwhisper). One-shot dismiss without disabling lives on the
+// "Dismiss" button / Esc in the input card. Clicks on the title area do
+// nothing — only drag-to-move — so users don't accidentally trigger the
+// dialog when reaching for the drag handle.
 struct AgentBadge: View {
     let agent: String
     let project: String
@@ -495,7 +676,6 @@ private struct SessionTabStrip: View {
                 }
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -574,7 +754,7 @@ struct MessageCard: View {
         let bodyBold = NSFont.systemFont(ofSize: 14, weight: .semibold)
         let mono = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         let monoInline = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular)
-        let codeFg = NSColor(white: 0.95, alpha: 1.0)
+        let codeFg = NSColor.labelColor
         let codeBg = NSColor.black.withAlphaComponent(0.45)
         let inlineCodeBg = NSColor.white.withAlphaComponent(0.10)
 
@@ -679,16 +859,19 @@ struct CrierPanelView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if !state.sessions.isEmpty {
-                SessionTabStrip(state: state)
-            }
-
             HStack(spacing: 8) {
                 AgentBadge(
                     agent: selected?.agentName ?? "claude-code",
                     project: selected?.projectName ?? "",
-                    onClose: onCancel
+                    onClose: { state.showDisableDialog = true }
                 )
+                // Tab strip lives inline with the badge so a parallel
+                // session shows up as a chip *next to* the active session
+                // instead of taking a whole row above it. Hidden when
+                // there's only one session — the badge already names it.
+                if state.sessions.count > 1 {
+                    SessionTabStrip(state: state)
+                }
                 Spacer(minLength: 8)
                 if let kind = selected?.eventKind, !kind.isEmpty && kind != "turn_done" {
                     Text(kind)
@@ -731,14 +914,16 @@ struct CrierPanelView: View {
                         state.showDisableDialog = false
                         onDisableSession()
                     },
+                    onLeave: {
+                        state.showDisableDialog = false
+                        onCancel()
+                    },
                     onCancel: {
                         state.showDisableDialog = false
                     }
                 )
-                .transition(.opacity.combined(with: .scale(scale: 0.95)))
             }
         }
-        .animation(.easeOut(duration: 0.15), value: state.showDisableDialog)
     }
 
     private var inputCard: some View {
@@ -840,6 +1025,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     var lastTerminalApp: NSRunningApplication?
     var statusItem: NSStatusItem?
     var statusDisableItem: NSMenuItem?
+    var conversationsWindow: NSWindow?
 
     // Install a minimal main menu — `.accessory` apps don't get one by default,
     // and without an Edit menu macOS doesn't route Cmd+C/V/X/A through the
@@ -888,6 +1074,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
         let menu = NSMenu()
 
+        let conversationsItem = NSMenuItem(
+            title: "Conversations…",
+            action: #selector(openConversationsWindow(_:)),
+            keyEquivalent: ","
+        )
+        conversationsItem.target = self
+        menu.addItem(conversationsItem)
+
+        menu.addItem(.separator())
+
         let disableItem = NSMenuItem(
             title: "Disable Crier (Global)",
             action: #selector(toggleGlobalDisable(_:)),
@@ -932,6 +1128,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
     @objc private func quitApp(_ sender: Any?) {
         NSApp.terminate(nil)
+    }
+
+    // Lazily create a single Conversations window. Subsequent menu clicks
+    // bring it forward instead of stacking duplicates. We're an .accessory
+    // app, so explicit `activate(ignoringOtherApps:)` is needed for the
+    // window to take focus.
+    @objc private func openConversationsWindow(_ sender: Any?) {
+        if let w = conversationsWindow {
+            w.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let view = ConversationsView(state: state)
+        let hosting = NSHostingController(rootView: view)
+        let w = NSWindow(contentViewController: hosting)
+        w.title = "Crier"
+        w.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+        w.setContentSize(NSSize(width: 480, height: 520))
+        w.center()
+        w.isReleasedWhenClosed = false
+        conversationsWindow = w
+        w.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     private func refreshGlobalDisableState() {
@@ -1071,13 +1290,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     // `/crier off` skill behavior, releases the blocking hook with an empty
     // reply, removes the current session tab.
     func confirmDisableSession() {
-        guard let s = state.selectedSession, let cwd = s.cwd, !cwd.isEmpty else { return }
-        let digest = Insecure.MD5.hash(data: Data(cwd.utf8))
-        let hex = digest.map { String(format: "%02x", $0) }.joined()
-        let path = "/tmp/crier-agent/disabled-\(hex)"
-        try? FileManager.default.createDirectory(atPath: "/tmp/crier-agent",
-                                                 withIntermediateDirectories: true)
-        FileManager.default.createFile(atPath: path, contents: nil)
+        guard let s = state.selectedSession else { return }
+        // Per-conversation disable — does NOT silence other agents in the
+        // same project. Whole-project disable lives in `/crier off` and the
+        // Conversations window's per-cwd toggle.
+        CrierEmitCore.setSessionDisabled(s.id, cwd: s.cwd ?? "")
 
         if let rid = s.requestId {
             postReply(body: ["request_id": rid, "text": ""])

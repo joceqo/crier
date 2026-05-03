@@ -96,6 +96,10 @@ let crierPort = Int(env["CRIER_PORT"] ?? "") ?? 8731
 let crierBase = "http://127.0.0.1:\(crierPort)"
 let cwd = (stdinJSON["cwd"] as? String) ?? FileManager.default.currentDirectoryPath
 let sessionIdRaw = (stdinJSON["session_id"] as? String) ?? String(UUID().uuidString.prefix(8))
+// Same id we post on the wire and persist for per-session disable flags.
+// `<agent>-<rawSessionId>` keeps two identical raw ids from different
+// agents (claude-code vs codex) from colliding.
+let fullSessionId = "\(agent)-\(sessionIdRaw)"
 
 var tmuxBlob: [String: Any]? = nil
 var replyChannel: String? = nil
@@ -124,10 +128,13 @@ case "claude-code", "cursor", "opencode":
             log("transcript: COULD NOT READ FILE")
         }
         // Race: Claude Code's Stop hook can fire before the assistant turn's
-        // text is flushed to the .jsonl. Poll until two consecutive reads match
-        // so we don't show a **stale** previous message when the file already
-        // has the new line, and we don't treat a still-growing file as stable
-        // too early. Cap ~1.35s (same order as the old fixed retry count).
+        // text is flushed to the .jsonl. Poll until a re-read matches so we
+        // don't ship a still-growing file as stable too early. Cap ~1.35s.
+        // First read is "free" (no sleep) — if the second confirms it, we
+        // ship after one 150ms tick. Older code required two confirmations
+        // (300ms minimum); empirically one is plenty and halves the delay
+        // before the overlay pops.
+        let stabilityPollStart = Date()
         var best = CrierEmitCore.extractLastAssistantMessage(transcriptPath: p)
         var stable = 0
         for _ in 0..<9 {
@@ -135,14 +142,15 @@ case "claude-code", "cursor", "opencode":
             let next = CrierEmitCore.extractLastAssistantMessage(transcriptPath: p)
             if next == best {
                 stable += 1
-                if stable >= 2 { break }
+                if stable >= 1 { break }
             } else {
                 best = next
                 stable = 0
             }
         }
         lastMessage = best
-        log("extracted message after stability poll (\(lastMessage.count) chars): \(String(lastMessage.prefix(160)))")
+        let pollMs = Int(Date().timeIntervalSince(stabilityPollStart) * 1000)
+        log("extracted message after \(pollMs)ms stability poll (\(lastMessage.count) chars): \(String(lastMessage.prefix(160)))")
     } else {
         log("WARNING: no transcript_path in stdin payload")
     }
@@ -164,7 +172,7 @@ let blockingEvent = (event == "turn_done")
 let requestId = UUID().uuidString
 
 var payload: [String: Any] = [
-    "session_id": "\(agent)-\(sessionIdRaw)",
+    "session_id": fullSessionId,
     "agent": agent,
     "event": event,
     "title": title,
@@ -206,6 +214,29 @@ func isCwdDisabled(_ cwd: String) -> Bool {
     FileManager.default.fileExists(atPath: CrierEmitCore.disabledPath(forCwd: cwd))
 }
 
+/// Synchronously asks the daemon how many UI clients are currently
+/// long-polling /current. Used to decide whether the TTY readline
+/// fallback should activate. Returns `nil` if the daemon is unreachable
+/// (caller should treat that as "no UI" so the TTY fallback engages and
+/// the hook can still be answered).
+func uiSubscriberCount(timeout: TimeInterval = 1.0) -> Int? {
+    guard let url = URL(string: "\(crierBase)/status") else { return nil }
+    var req = URLRequest(url: url)
+    req.timeoutInterval = timeout
+    var count: Int?
+    let sem = DispatchSemaphore(value: 0)
+    URLSession.shared.dataTask(with: req) { data, response, _ in
+        defer { sem.signal() }
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+              let data = data,
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let n = obj["ui_subscribers"] as? Int else { return }
+        count = n
+    }.resume()
+    _ = sem.wait(timeout: .now() + timeout + 0.5)
+    return count
+}
+
 func longPollReply(requestId: String, waitSeconds: Int) -> String? {
     guard let url = URL(string: "\(crierBase)/reply?request_id=\(requestId)&wait=\(waitSeconds)") else { return nil }
     var req = URLRequest(url: url)
@@ -224,44 +255,38 @@ func longPollReply(requestId: String, waitSeconds: Int) -> String? {
     return result
 }
 
-// Read one line from the controlling terminal (/dev/tty), bypassing stdin
-// which is already consumed (it holds the hook JSON payload). Uses poll()
-// so it honors the same timeout as the HTTP long-poll and doesn't block
-// forever if no input arrives.
-func ttyReply(timeoutSeconds: Int) -> String? {
-    let fd = open("/dev/tty", O_RDWR)
-    guard fd >= 0 else { return nil }
-    defer { close(fd) }
-
-    let prompt = "\n[crier] type reply here (or use the overlay): "
-    _ = prompt.withCString { write(fd, $0, strlen($0)) }
-
-    var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
-    let ready = poll(&pfd, 1, Int32(timeoutSeconds) * 1000)
-    guard ready > 0 else { return nil }
-
-    var line = ""
-    var byte = UInt8(0)
-    while read(fd, &byte, 1) == 1 {
-        if byte == UInt8(ascii: "\n") { break }
-        line.append(Character(UnicodeScalar(byte)))
-    }
-    return line.trimmingCharacters(in: .whitespaces).isEmpty ? nil : line.trimmingCharacters(in: .whitespaces)
-}
-
 log("start: agent=\(agent) event=\(event) blocking=\(blockingEvent) request_id=\(requestId)")
 log("cwd=\(cwd) tmux_pane=\(env["TMUX_PANE"] ?? "-")")
 
-// Short-circuit if Crier is disabled — either globally (via the menu-bar
-// status item) or for this CWD (via `/crier off` or the UI's "Disable for
-// this session" button). In both cases skip the panel pop entirely and
-// exit 0 so the hook chain unblocks normally.
+// Short-circuit if Crier is disabled — globally (menu-bar toggle), for
+// this CWD (`/crier off` skill), or for this specific conversation (the
+// badge X dialog / Conversations window). All three skip the panel pop
+// and exit 0 so the hook chain unblocks normally.
 if CrierEmitCore.isGloballyDisabled() {
     log("global disable flag present — skipping")
     exit(0)
 }
 if isCwdDisabled(cwd) {
     log("disabled flag present for cwd=\(cwd) — skipping")
+    exit(0)
+}
+if CrierEmitCore.isSessionDisabled(fullSessionId) {
+    log("disabled flag present for session=\(fullSessionId) — skipping")
+    exit(0)
+}
+
+// Short-circuit when no Crier UI is listening. Posting an event that
+// nobody will see, then blocking the hook for 9 minutes, is worse than
+// just letting Claude continue. Two probes 200 ms apart absorb the
+// brief window where the UI is between long-polls (handleEvent runs
+// before subscribeLoop re-issues GET /current).
+func uiAlive() -> Bool {
+    if (uiSubscriberCount() ?? 0) > 0 { return true }
+    Thread.sleep(forTimeInterval: 0.2)
+    return (uiSubscriberCount() ?? 0) > 0
+}
+if !uiAlive() {
+    log("no Crier UI listening — skipping (treat like /crier off)")
     exit(0)
 }
 
@@ -274,7 +299,7 @@ if CrierEmptyMessageDiagnostic.shouldLogEmptyMessage(event: event),
         "agent": agent,
         "event": event,
         "cwd": cwd,
-        "session_id": "\(agent)-\(sessionIdRaw)",
+        "session_id": fullSessionId,
         "stdin_json_keys": stdinJSON.keys.sorted().map { $0 },
     ]
     if let tp = stdinJSON["transcript_path"] as? String {
@@ -300,51 +325,18 @@ postEvent(payloadData)
 log("posted event (\(payloadData.count) bytes)")
 
 if blockingEvent {
-    log("waiting for reply via overlay OR terminal (request_id=\(requestId))")
+    // Long-poll the daemon for the user's reply via the overlay. The TTY
+    // readline fallback that used to race this was removed because it
+    // leaked terminal escape sequences (focus events, mouse motion) into
+    // the visible terminal whenever Claude's TUI had the tty in raw mode.
+    // The earlier `uiAlive()` short-circuit guarantees a UI is connected
+    // before we get here, so an unanswered long-poll only happens when
+    // the user explicitly dismisses the panel without typing.
+    log("waiting for overlay reply (request_id=\(requestId))")
+    let replyText = longPollReply(requestId: requestId, waitSeconds: 540)
+    log("reply from overlay: \(String(replyText?.prefix(80) ?? "nil"))")
 
-    // Race the Crier UI overlay against direct terminal input — whichever
-    // delivers first wins. This way the user isn't locked out if the overlay
-    // is closed or they prefer to type in the terminal.
-    //
-    // ReplyRace is @unchecked Sendable so it can be shared across threads
-    // without Swift 6 main-actor isolation errors.
-    final class ReplyRace: @unchecked Sendable {
-        private let lock = NSLock()
-        private var settled = false
-        let done = DispatchSemaphore(value: 0)
-        private(set) var winner: String?
-        private(set) var source: String?
-
-        // Only settle when text is non-empty — a nil/empty result from one
-        // source (e.g., /dev/tty unavailable, long-poll timeout) must not
-        // suppress a valid reply arriving later from the other source.
-        func settle(_ text: String?, from src: String) {
-            guard let text, !text.isEmpty else { return }
-            lock.lock(); defer { lock.unlock() }
-            guard !settled else { return }
-            settled = true; winner = text; source = src
-            done.signal()
-        }
-    }
-
-    let race = ReplyRace()
-    let rid = requestId  // local let — String is Sendable
-
-    // Source 1: Crier UI via HTTP long-poll.
-    DispatchQueue.global().async {
-        race.settle(longPollReply(requestId: rid, waitSeconds: 540), from: "overlay")
-    }
-
-    // Source 2: terminal — /dev/tty is the controlling terminal regardless of
-    // what stdin contains (stdin is already consumed by the hook JSON payload).
-    DispatchQueue.global().async {
-        race.settle(ttyReply(timeoutSeconds: 540), from: "terminal")
-    }
-
-    _ = race.done.wait(timeout: .now() + 550)
-    log("reply from \(race.source ?? "none"): \(String(race.winner?.prefix(80) ?? "nil"))")
-
-    if let reply = race.winner, !reply.isEmpty {
+    if let reply = replyText, !reply.isEmpty {
         // Wrap the user's text so Claude treats it as the next user message
         // rather than as out-of-band hook info. Without the framing, Claude
         // tends to respond with "Acknowledged — received via Stop hook" or

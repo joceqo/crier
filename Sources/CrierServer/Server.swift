@@ -79,6 +79,16 @@ private final class EventHub: @unchecked Sendable {
         }
         return promise.futureResult
     }
+
+    /// Number of UI clients currently long-polling /current. Used by
+    /// crier-emit to decide whether the TTY readline fallback should
+    /// activate — if a UI is connected, the overlay handles the reply
+    /// and the TTY race would only leak terminal escape sequences.
+    func subscriberCount() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return waiters.count
+    }
 }
 
 // Per-CWD disable is now filesystem-based at /tmp/crier-agent/disabled-<md5(cwd)>,
@@ -177,6 +187,10 @@ private final class CrierHTTPHandler: ChannelInboundHandler {
 
         case (.GET, "/healthz"):
             responseFuture = context.eventLoop.makeSucceededFuture((.ok, "application/json", #"{"ok":true}"#))
+
+        case (.GET, "/status"):
+            let n = EventHub.shared.subscriberCount()
+            responseFuture = context.eventLoop.makeSucceededFuture((.ok, "application/json", #"{"ui_subscribers":\#(n)}"#))
 
         default:
             responseFuture = context.eventLoop.makeSucceededFuture((.notFound, "application/json", #"{"error":"not found"}"#))
