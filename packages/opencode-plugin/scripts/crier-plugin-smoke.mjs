@@ -163,10 +163,12 @@ assert.equal(record.permission.length, 0)
 record.promptAsync.length = 0
 state.lastRequestId = null
 
-// permission.updated → long-poll → postSessionIdPermissionsPermissionId
+// permission.asked → long-poll → postSessionIdPermissionsPermissionId
+// (OpenCode's actual emitted event name; older drafts of this smoke used
+// permission.updated, which the plugin and OpenCode never agreed on.)
 const p2 = hooks.event({
   event: {
-    type: "permission.updated",
+    type: "permission.asked",
     properties: {
       id: "perm-xyz",
       type: "tool",

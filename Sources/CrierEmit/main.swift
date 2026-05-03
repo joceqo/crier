@@ -81,7 +81,12 @@ func prettyAgentName(_ a: String) -> String {
 }
 
 let args = CommandLine.arguments
+// Log invocation before any validation so we still have a trace when an
+// agent's hook config passes the wrong number of arguments and we'd
+// otherwise exit(2) before reaching the start-of-run log later in this file.
+log("invoked argv=\(args.dropFirst().joined(separator: " "))")
 guard args.count >= 3 else {
+    log("argv malformed — expected `crier-emit <agent> <event>`, exiting 2")
     FileHandle.standardError.write(Data("usage: crier-emit <agent> <event>\n".utf8))
     exit(2)
 }

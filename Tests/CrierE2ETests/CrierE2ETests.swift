@@ -82,6 +82,19 @@ final class CrierE2ETests: XCTestCase {
         return result
     }
 
+    /// Drain events until one matches `match` (or the budget expires).
+    /// Real agent runs fire several hooks in a single turn (UserPromptSubmit,
+    /// PreToolUse, …, Stop), so a `nextEvent()` looking for `turn_done` will
+    /// get a `dismiss` first and miss the one it wants. This polls.
+    private func nextEventMatching(_ match: ([String: Any]) -> Bool, totalBudget: TimeInterval) -> [String: Any]? {
+        let deadline = Date().addingTimeInterval(totalBudget)
+        while Date() < deadline {
+            let remaining = max(2, Int(deadline.timeIntervalSinceNow))
+            if let evt = nextEvent(waitSeconds: remaining), match(evt) { return evt }
+        }
+        return nil
+    }
+
     // MARK: - Claude Code E2E
 
     // Verifies the full flow:
@@ -91,17 +104,22 @@ final class CrierE2ETests: XCTestCase {
         try requireE2E()
         let claudePath = try requireBinary("claude")
 
-        // Register the long-poll before spawning Claude so we don't miss the event.
+        // Unique marker so we can verify it's Claude's actual output.
+        let marker = "CRIER_E2E_\(UUID().uuidString.prefix(8))"
+
+        // A real agent run emits several hooks in one turn (UserPromptSubmit,
+        // PreToolUse, …, Stop), so we need to filter for `turn_done` rather
+        // than grab the first event. Start the poll BEFORE spawning Claude.
         var received: [String: Any]?
         let eventSem = DispatchSemaphore(value: 0)
         DispatchQueue.global().async {
-            received = self.nextEvent(waitSeconds: 60)
+            received = self.nextEventMatching(
+                { ($0["event"] as? String) == "turn_done" && ($0["agent"] as? String) == "claude-code" },
+                totalBudget: 75
+            )
             eventSem.signal()
         }
         Thread.sleep(forTimeInterval: 0.1)
-
-        // Unique marker so we can verify it's Claude's actual output.
-        let marker = "CRIER_E2E_\(UUID().uuidString.prefix(8))"
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: claudePath)
@@ -116,8 +134,8 @@ final class CrierE2ETests: XCTestCase {
         try p.run()
         p.waitUntilExit()
 
-        _ = eventSem.wait(timeout: .now() + 75)
-        let event = try XCTUnwrap(received, "no event received within timeout — hook may not be configured or crier-emit may not be installed")
+        _ = eventSem.wait(timeout: .now() + 80)
+        let event = try XCTUnwrap(received, "no turn_done event received within timeout — hook may not be configured or crier-emit may not be installed")
         XCTAssertEqual(event["agent"] as? String, "claude-code")
         XCTAssertEqual(event["event"] as? String, "turn_done")
         let message = event["message"] as? String ?? ""
@@ -240,15 +258,18 @@ final class CrierE2ETests: XCTestCase {
             throw XCTSkip("None of \(cliCandidates.joined(separator: ", ")) found on PATH")
         }
 
+        let marker = "CRIER_E2E_\(UUID().uuidString.prefix(8))"
         var received: [String: Any]?
         let sem = DispatchSemaphore(value: 0)
         DispatchQueue.global().async {
-            received = self.nextEvent(waitSeconds: 90)
+            received = self.nextEventMatching(
+                { ($0["event"] as? String) == "turn_done" && ($0["agent"] as? String) == expectedAgent },
+                totalBudget: 100
+            )
             sem.signal()
         }
         Thread.sleep(forTimeInterval: 0.1)
 
-        let marker = "CRIER_E2E_\(UUID().uuidString.prefix(8))"
         let p = Process()
         p.executableURL = URL(fileURLWithPath: cliPath)
         p.arguments = ["-p", "Reply with only this exact string, nothing else: \(marker)"]
@@ -260,8 +281,8 @@ final class CrierE2ETests: XCTestCase {
         try p.run()
         p.waitUntilExit()
 
-        _ = sem.wait(timeout: .now() + 100)
-        let event = try XCTUnwrap(received, "no event — is \(cliPath) wired to crier-emit \(expectedAgent) in hooks?")
+        _ = sem.wait(timeout: .now() + 110)
+        let event = try XCTUnwrap(received, "no turn_done event for \(expectedAgent) — is \(cliPath) wired to crier-emit in hooks?")
         XCTAssertEqual(event["agent"] as? String, expectedAgent)
         XCTAssertEqual(event["event"] as? String, "turn_done")
         let message = event["message"] as? String ?? ""

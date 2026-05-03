@@ -10,12 +10,18 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 HOOKS="${HOME}/.cursor/hooks.json"
 
 command -v jq    >/dev/null || { echo "jq required (brew install jq)" >&2; exit 1; }
-command -v swift >/dev/null || { echo "Swift toolchain required" >&2; exit 1; }
 
-echo "==> Building crier-emit (release)"
-( cd "$REPO_DIR" && swift build -c release --product crier-emit )
-
-EMIT="$REPO_DIR/.build/release/crier-emit"
+# CRIER_EMIT_BIN lets callers (notably the test suite, which would otherwise
+# nested-deadlock on `.build/`) skip the swift build and point at a binary
+# they already built. Normal humans never set this.
+if [[ -n "${CRIER_EMIT_BIN:-}" ]]; then
+    EMIT="$CRIER_EMIT_BIN"
+else
+    command -v swift >/dev/null || { echo "Swift toolchain required" >&2; exit 1; }
+    echo "==> Building crier-emit (release)"
+    ( cd "$REPO_DIR" && swift build -c release --product crier-emit )
+    EMIT="$REPO_DIR/.build/release/crier-emit"
+fi
 test -x "$EMIT" || { echo "build did not produce $EMIT" >&2; exit 1; }
 
 mkdir -p "${HOME}/.cursor"

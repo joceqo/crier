@@ -10,12 +10,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 CONFIG="${HOME}/.codex/config.toml"
 
-command -v swift >/dev/null || { echo "Swift toolchain required" >&2; exit 1; }
-
-echo "==> Building crier-emit (release)"
-( cd "$REPO_DIR" && swift build -c release --product crier-emit )
-
-EMIT="$REPO_DIR/.build/release/crier-emit"
+# CRIER_EMIT_BIN lets callers (notably the test suite, which would otherwise
+# nested-deadlock on `.build/`) skip the swift build and point at a binary
+# they already built. Normal humans never set this.
+if [[ -n "${CRIER_EMIT_BIN:-}" ]]; then
+    EMIT="$CRIER_EMIT_BIN"
+else
+    command -v swift >/dev/null || { echo "Swift toolchain required" >&2; exit 1; }
+    echo "==> Building crier-emit (release)"
+    ( cd "$REPO_DIR" && swift build -c release --product crier-emit )
+    EMIT="$REPO_DIR/.build/release/crier-emit"
+fi
 test -x "$EMIT" || { echo "build did not produce $EMIT" >&2; exit 1; }
 
 mkdir -p "${HOME}/.codex"
@@ -41,14 +46,23 @@ else
     echo "==> [features] section already exists; ensure it contains: codex_hooks = true"
 fi
 
+# Codex's hook TOML is two-level: [[hooks.<Event>]] is just a group header
+# (it carries an optional `matcher`), and the actual handler goes in a
+# nested [[hooks.<Event>.hooks]] table. Earlier versions of this script put
+# the handler fields directly under [[hooks.Stop]] and Codex silently
+# ignored them — verified against developers.openai.com/codex/hooks.
 cat <<EOF >> "$CONFIG"
 
 [[hooks.Stop]]
+
+[[hooks.Stop.hooks]]
 type = "command"
 command = "$EMIT codex turn_done"
 timeout = 10
 
 [[hooks.PermissionRequest]]
+
+[[hooks.PermissionRequest.hooks]]
 type = "command"
 command = "$EMIT codex needs_permission"
 timeout = 10
