@@ -127,12 +127,16 @@ enum Installer {
         var hooks = (json["hooks"] as? [String: Any]) ?? [:]
         // Stop / Notification / PermissionRequest / PreToolUse / UserPromptSubmit.
         // Schema mirrors install-local-claude-code.sh — kept in sync deliberately.
+        // No `async: true` and no `timeout` — match Superwhisper's claude-hook
+        // config exactly. Sync blocking hook lets crier-emit long-poll /reply
+        // for as long as the user takes; an empty /reply (Dismiss in Crier)
+        // releases it cleanly. Earlier versions set `async: true, timeout: 30`,
+        // which killed crier-emit's reply wait at 30s and silently dropped
+        // user replies typed after that window.
         hooks["Stop"] = stripCrierAndAppend(
             hooks["Stop"] as? [[String: Any]],
             entry: ["hooks": [["type": "command",
-                               "command": "\(emit) claude-code turn_done",
-                               "timeout": 30,
-                               "async": true]]]
+                               "command": "\(emit) claude-code turn_done"]]]
         )
         hooks["Notification"] = stripCrierAndAppend(
             hooks["Notification"] as? [[String: Any]],
