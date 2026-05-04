@@ -7,14 +7,34 @@ import CrierEmitCore
 // CrierServer — local HTTP server reused by `crier-daemon` (CLI) and `Crier.app`
 // (UI process embeds it so launching the app starts the server in-process).
 //
-//   POST /event              intake from hook adapters (logged + broadcast)
-//   POST /reply              deliver the user's reply (wakes long-poll waiter
-//                            keyed by request_id; runs `tmux send-keys` for
-//                            channel="tmux"; for keystroke channel the UI
-//                            does its own CGEvent dispatch).
+//   POST /event              intake from hook adapters (logged + broadcast).
+//                            event=="dismiss" also clears any queued reply
+//                            and engage flag for that session_id (the user
+//                            moved on by typing in the terminal directly).
+//   POST /reply              legacy delivery keyed by request_id — wakes
+//                            long-poll waiter for cursor/codex/opencode and
+//                            runs `tmux send-keys` for channel="tmux".
 //   GET  /reply?request_id=X&wait=N
-//                            long-poll until the matching POST /reply lands
-//                            (or N seconds elapse, returning 204).
+//                            legacy long-poll for non-claude-code agents.
+//   POST /reply/queue        Pre-queue architecture (mirrors Superwhisper's
+//                            file-IPC pattern). Body: {session_id, text}.
+//                            Stores text for that session; wakes any waiter.
+//                            UI hits this when the user clicks Send.
+//   POST /reply/engage       Body: {session_id, extend_seconds?}. Bumps the
+//                            session's "user is engaging" deadline so a
+//                            concurrent /reply/drain extends its wait. UI
+//                            hits this on the user's first keystroke per
+//                            turn.
+//   POST /reply/dismiss      Body: {session_id}. Clears the queued reply
+//                            and engage flag, releases any parked drain
+//                            with no content. UI hits this on Esc/Dismiss
+//                            so the hook doesn't keep the terminal blocked
+//                            for the rest of the engage window.
+//   GET  /reply/drain?session_id=X&wait_ms=N
+//                            Hook-side blocking probe. Returns immediately
+//                            if a queued reply is present, otherwise waits
+//                            up to wait_ms (extended while engage_until is
+//                            in the future). 204 on final timeout.
 //   GET  /current?wait=N     long-poll for the next event broadcast.
 //   GET  /healthz            cheap liveness probe.
 
@@ -138,6 +158,128 @@ private final class ReplyHub: @unchecked Sendable {
     }
 }
 
+// MARK: - ReplyQueueHub
+//
+// Pre-queue architecture (see crier-prequeue-architecture.md). Mirrors
+// Superwhisper's claude-hook IPC pattern: the user can "queue" a reply
+// independently of the hook firing, the hook drains the queue with a short
+// initial wait, and the wait can be extended on demand while the user is
+// actively typing in the overlay. Result: terminal stays free, no fixed
+// 540 s ceiling, and decision:block only fires when there's actually a
+// reply to deliver.
+//
+// State per session_id:
+//   - `queued`: a reply text waiting to be drained (Send was clicked but
+//     no GET /reply/drain was parked yet, or the user pre-queued during
+//     the agent's turn).
+//   - `engageUntil`: a future Date at which the "user is engaging" hint
+//     expires. /reply/drain extends its wait up to this deadline whenever
+//     it would otherwise time out.
+//
+// Waiters (parked GET /reply/drain calls) are stored by their own UUID so
+// multiple in-flight drains for the same session (rare; can happen during
+// rapid Stop hook re-fires) all wake on the same deliver().
+private final class ReplyQueueHub: @unchecked Sendable {
+    static let shared = ReplyQueueHub()
+    private let lock = NSLock()
+    private var queued: [String: String] = [:]
+    private var engageUntil: [String: Date] = [:]
+    private var waiters: [UUID: (sessionId: String, promise: EventLoopPromise<String?>)] = [:]
+
+    /// Store a reply for later drain, OR wake any drain currently parked
+    /// for this session. Empty `text` is treated as "no reply" (matches
+    /// the UI's Send-disabled-when-empty contract) and is dropped silently
+    /// so a stray POST can't fire a phantom decision:block.
+    @discardableResult
+    func deliver(sessionId: String, text: String) -> Int {
+        guard !text.isEmpty else { return 0 }
+        lock.lock()
+        let matching = waiters.filter { $0.value.sessionId == sessionId }
+        for k in matching.keys { waiters.removeValue(forKey: k) }
+        if matching.isEmpty {
+            queued[sessionId] = text
+        } else {
+            // A waiter is taking it — drop any stale queued copy so it
+            // isn't double-delivered on the next drain.
+            queued.removeValue(forKey: sessionId)
+        }
+        lock.unlock()
+        for (_, w) in matching { w.promise.succeed(text) }
+        return matching.count
+    }
+
+    /// Bump the "user is engaging" deadline. Idempotent — a later engage
+    /// with a smaller extension does not retract the longer one already
+    /// in flight. The UI calls this once per keystroke (debounced) so the
+    /// hook keeps waiting as long as the user is typing.
+    func engage(sessionId: String, extendSeconds: Int) {
+        let until = Date().addingTimeInterval(TimeInterval(extendSeconds))
+        lock.lock()
+        if (engageUntil[sessionId] ?? .distantPast) < until {
+            engageUntil[sessionId] = until
+        }
+        lock.unlock()
+    }
+
+    /// Clear queue + engage flag and release any parked waiter with nil.
+    /// Triggered on event=="dismiss" (UserPromptSubmit — user moved on)
+    /// and on Esc/Dismiss in the overlay.
+    func clear(sessionId: String) {
+        lock.lock()
+        queued.removeValue(forKey: sessionId)
+        engageUntil.removeValue(forKey: sessionId)
+        let matching = waiters.filter { $0.value.sessionId == sessionId }
+        for k in matching.keys { waiters.removeValue(forKey: k) }
+        lock.unlock()
+        for (_, w) in matching { w.promise.succeed(nil) }
+    }
+
+    /// Park until a queued reply is delivered or the wait deadline lapses.
+    /// The deadline starts at `baseTimeoutMs` and slides forward to
+    /// `engageUntil` whenever the original timer fires while engagement
+    /// is still active.
+    func awaitDrain(sessionId: String, eventLoop: EventLoop, baseTimeoutMs: Int) -> EventLoopFuture<String?> {
+        lock.lock()
+        if let text = queued.removeValue(forKey: sessionId) {
+            lock.unlock()
+            return eventLoop.makeSucceededFuture(text)
+        }
+        let waiterId = UUID()
+        let promise = eventLoop.makePromise(of: String?.self)
+        waiters[waiterId] = (sessionId, promise)
+        lock.unlock()
+
+        let initialDeadline = Date().addingTimeInterval(TimeInterval(baseTimeoutMs) / 1000.0)
+        scheduleCheck(waiterId: waiterId, sessionId: sessionId, eventLoop: eventLoop, deadline: initialDeadline)
+        return promise.futureResult
+    }
+
+    /// Recursive timer: when the current deadline fires, see whether the
+    /// engage flag pushed the deadline further out and reschedule, or
+    /// give up with nil.
+    private func scheduleCheck(waiterId: UUID, sessionId: String, eventLoop: EventLoop, deadline: Date) {
+        let now = Date()
+        let delaySeconds = max(0.05, deadline.timeIntervalSince(now))
+        eventLoop.scheduleTask(in: .milliseconds(Int64(delaySeconds * 1000))) { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            // If deliver()/clear() already removed the waiter, do nothing.
+            guard let waiter = self.waiters[waiterId] else {
+                self.lock.unlock()
+                return
+            }
+            if let until = self.engageUntil[sessionId], until > Date() {
+                self.lock.unlock()
+                self.scheduleCheck(waiterId: waiterId, sessionId: sessionId, eventLoop: eventLoop, deadline: until)
+                return
+            }
+            self.waiters.removeValue(forKey: waiterId)
+            self.lock.unlock()
+            waiter.promise.succeed(nil)
+        }
+    }
+}
+
 // MARK: - HTTP handler
 
 // `@unchecked Sendable` because NIO confines handler instances to their
@@ -180,9 +322,26 @@ private final class CrierHTTPHandler: ChannelInboundHandler, @unchecked Sendable
             handleEvent(body: bodyData)
             responseFuture = context.eventLoop.makeSucceededFuture((.ok, "application/json", #"{"ok":true}"#))
 
+        case (.POST, "/reply/queue"):
+            handlePostReplyQueue(body: bodyData)
+            responseFuture = context.eventLoop.makeSucceededFuture((.ok, "application/json", #"{"ok":true}"#))
+
+        case (.POST, "/reply/engage"):
+            handlePostReplyEngage(body: bodyData)
+            responseFuture = context.eventLoop.makeSucceededFuture((.ok, "application/json", #"{"ok":true}"#))
+
+        case (.POST, "/reply/dismiss"):
+            handlePostReplyDismiss(body: bodyData)
+            responseFuture = context.eventLoop.makeSucceededFuture((.ok, "application/json", #"{"ok":true}"#))
+
         case (.POST, "/reply"):
             handlePostReply(body: bodyData)
             responseFuture = context.eventLoop.makeSucceededFuture((.ok, "application/json", #"{"ok":true}"#))
+
+        // /reply/drain must be matched before the broader /reply prefix
+        // below, otherwise it falls into handleGetReply.
+        case (.GET, let uri) where uri.hasPrefix("/reply/drain"):
+            responseFuture = handleGetReplyDrain(uri: uri, eventLoop: context.eventLoop)
 
         case (.GET, let uri) where uri.hasPrefix("/reply"):
             responseFuture = handleGetReply(uri: uri, eventLoop: context.eventLoop)
@@ -286,6 +445,13 @@ private final class CrierHTTPHandler: ChannelInboundHandler, @unchecked Sendable
             CrierEmptyMessageDiagnostic.append(record: rec)
         }
 
+        // UserPromptSubmit fires this event with kind "dismiss" — the user
+        // moved on by typing in the agent's TTY directly, so any pre-queued
+        // overlay reply is now stale and must not fire on the next turn.
+        if event == "dismiss", session != "?" {
+            ReplyQueueHub.shared.clear(sessionId: session)
+        }
+
         EventHub.shared.publish(body)
     }
 
@@ -363,6 +529,56 @@ private final class CrierHTTPHandler: ChannelInboundHandler, @unchecked Sendable
         let clamped = max(1, min(600, waitSeconds))
 
         return ReplyHub.shared.awaitReply(requestId: requestId, eventLoop: eventLoop, timeoutSeconds: clamped).map { text in
+            if let text = text {
+                return (.ok, "text/plain; charset=utf-8", text)
+            } else {
+                return (.noContent, "application/json", "")
+            }
+        }
+    }
+
+    // MARK: pre-queue handlers
+
+    private func handlePostReplyQueue(body: Data) {
+        let parsed = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] ?? [:]
+        guard let session = parsed["session_id"] as? String, !session.isEmpty else { return }
+        let text = parsed["text"] as? String ?? ""
+        ReplyQueueHub.shared.deliver(sessionId: session, text: text)
+        let preview = String(text.prefix(120))
+        FileHandle.standardOutput.write(Data(
+            "[\(isoFormatter.string(from: Date()))] reply/queue · \(session) · \(preview)\n".utf8
+        ))
+    }
+
+    private func handlePostReplyDismiss(body: Data) {
+        let parsed = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] ?? [:]
+        guard let session = parsed["session_id"] as? String, !session.isEmpty else { return }
+        ReplyQueueHub.shared.clear(sessionId: session)
+    }
+
+    private func handlePostReplyEngage(body: Data) {
+        let parsed = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] ?? [:]
+        guard let session = parsed["session_id"] as? String, !session.isEmpty else { return }
+        // Default 30s window per engage call. UI is expected to call this
+        // periodically while the user is typing; each call extends the
+        // wait by another window. Cap at 540s just to avoid runaway waits.
+        let raw = parsed["extend_seconds"] as? Int ?? 30
+        let extend = max(1, min(540, raw))
+        ReplyQueueHub.shared.engage(sessionId: session, extendSeconds: extend)
+    }
+
+    private func handleGetReplyDrain(uri: String, eventLoop: EventLoop) -> EventLoopFuture<(HTTPResponseStatus, String, String)> {
+        guard let comps = URLComponents(string: "http://h\(uri)"),
+              let session = comps.queryItems?.first(where: { $0.name == "session_id" })?.value,
+              !session.isEmpty else {
+            return eventLoop.makeSucceededFuture((.badRequest, "application/json", #"{"error":"missing session_id"}"#))
+        }
+        let waitMs = Int(comps.queryItems?.first(where: { $0.name == "wait_ms" })?.value ?? "3000") ?? 3000
+        // Cap at 60s — engage extensions can carry waits well past this,
+        // but the base wait shouldn't be set higher by a client.
+        let clamped = max(50, min(60_000, waitMs))
+
+        return ReplyQueueHub.shared.awaitDrain(sessionId: session, eventLoop: eventLoop, baseTimeoutMs: clamped).map { text in
             if let text = text {
                 return (.ok, "text/plain; charset=utf-8", text)
             } else {

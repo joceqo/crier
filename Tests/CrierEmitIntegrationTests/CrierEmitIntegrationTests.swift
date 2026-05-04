@@ -292,12 +292,17 @@ final class CrierEmitIntegrationTests: XCTestCase {
         try runHookStdoutReplyRoundTrip(agent: "cursor", replyText: "two")
     }
 
-    /// Claude Code reply round-trip via hook-stdout. Previously excluded
-    /// from the blocking path; restored once we confirmed (via Superwhisper)
-    /// that Claude Code's Stop hook does respect synchronous decision:block.
-    /// This test is the regression guard for that change.
-    func testEmitClaudeCodeTurnDoneDeliversReplyViaHookStdout() throws {
-        try runHookStdoutReplyRoundTrip(agent: "claude-code", replyText: "claude-reply")
+    /// Claude Code reply round-trip via the pre-queue path (see
+    /// crier-prequeue-architecture.md). Asserts:
+    ///   • the emitted event advertises reply_channel="hook-stdout-queue"
+    ///   • POST /reply/queue with the event's session_id wakes crier-emit
+    ///   • crier-emit prints {"decision":"block","reason":...} containing
+    ///     the queued text
+    /// Replaces the legacy hook-stdout/request_id round-trip for
+    /// claude-code; the legacy path is still the regression target for
+    /// cursor/codex/opencode below.
+    func testEmitClaudeCodeTurnDoneDeliversReplyViaQueueDrain() throws {
+        try runQueueDrainRoundTrip(replyText: "claude-reply")
     }
 
     func testEmitCodexTurnDoneDeliversReplyViaHookStdout() throws {
@@ -387,6 +392,70 @@ final class CrierEmitIntegrationTests: XCTestCase {
         XCTAssertEqual(parsed?["decision"] as? String, "block", "[\(agent)] expected decision:block")
         let reason = parsed?["reason"] as? String ?? ""
         XCTAssertTrue(reason.contains(replyText), "[\(agent)] reason should contain the reply text, got: \(reason)")
+    }
+
+    /// Pre-queue round-trip for claude-code:
+    ///   1. spawn crier-emit; it POSTs the event with reply_channel=
+    ///      "hook-stdout-queue" and parks on /reply/drain keyed on
+    ///      session_id
+    ///   2. test reads the session_id off the event
+    ///   3. test POSTs /reply/queue (mimics UI Send)
+    ///   4. drain wakes; crier-emit prints {"decision":"block","reason":...}
+    ///   5. assert reply text round-trips into the decision JSON and the
+    ///      event advertised the new channel
+    private func runQueueDrainRoundTrip(replyText: String) throws {
+        guard !Self.emitBinaryPath.isEmpty else { throw XCTSkip("crier-emit binary not built") }
+
+        let transcript = try makeTranscript(message: "claude-code: pre-queue test")
+        let payload: [String: Any] = [
+            "transcript_path": transcript.path,
+            "session_id": "queue-drain-\(UUID().uuidString)",
+            "cwd": "/tmp",
+        ]
+
+        var received: [String: Any]?
+        let eventSem = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            received = self.nextEvent(waitSeconds: 10)
+            eventSem.signal()
+        }
+        Thread.sleep(forTimeInterval: 0.05)
+
+        var emitOutput = ""
+        let emitSem = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            let (_, stdout, _) = self.runEmit(agent: "claude-code", event: "turn_done", stdinPayload: payload)
+            emitOutput = stdout
+            emitSem.signal()
+        }
+
+        _ = eventSem.wait(timeout: .now() + 15)
+        guard let event = received else { return XCTFail("[claude-code] no event received") }
+        XCTAssertEqual(event["reply_channel"] as? String, "hook-stdout-queue",
+                       "claude-code turn_done must advertise hook-stdout-queue")
+        guard let receivedSessionId = event["session_id"] as? String else {
+            return XCTFail("[claude-code] event missing session_id")
+        }
+
+        guard let queueURL = URL(string: "\(Self.base)/reply/queue") else { return }
+        var req = URLRequest(url: queueURL)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "content-type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: [
+            "session_id": receivedSessionId,
+            "text": replyText,
+        ])
+        req.timeoutInterval = 5
+        let sem = DispatchSemaphore(value: 0)
+        URLSession.shared.dataTask(with: req) { _, _, _ in sem.signal() }.resume()
+        _ = sem.wait(timeout: .now() + 6)
+
+        _ = emitSem.wait(timeout: .now() + 10)
+        let parsed = (try? JSONSerialization.jsonObject(with: Data(emitOutput.utf8))) as? [String: Any]
+        XCTAssertEqual(parsed?["decision"] as? String, "block", "[claude-code] expected decision:block")
+        let reason = parsed?["reason"] as? String ?? ""
+        XCTAssertTrue(reason.contains(replyText),
+                      "[claude-code] reason should contain the reply text, got: \(reason)")
     }
 
     func testEmitRespectsGlobalDisableFlag() throws {

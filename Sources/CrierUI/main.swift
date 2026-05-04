@@ -157,8 +157,32 @@ final class CrierState: ObservableObject, @unchecked Sendable {
     func updateReplyDraft(sessionId id: String, text: String) {
         guard let idx = sessions.firstIndex(where: { $0.id == id }) else { return }
         var copy = sessions
+        let wasEmpty = copy[idx].replyDraft.isEmpty
         copy[idx].replyDraft = text
         sessions = copy
+        // First keystroke per turn → notify the daemon the user is
+        // engaging this session, so /reply/drain extends its wait window.
+        // Only meaningful for the pre-queue path; cheap no-op for others.
+        if wasEmpty && !text.isEmpty,
+           copy[idx].replyChannel == "hook-stdout-queue" {
+            CrierState.postReplyEngage(sessionId: id)
+        }
+    }
+
+    /// Fire-and-forget POST /reply/engage. Called on the user's first
+    /// keystroke per turn (and could be called on Send too, but Send already
+    /// queues a reply which wakes the drain).
+    static func postReplyEngage(sessionId: String) {
+        guard let url = URL(string: "\(endpoint)/reply/engage"),
+              let data = try? JSONSerialization.data(withJSONObject: [
+                "session_id": sessionId,
+                "extend_seconds": 30,
+              ]) else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "content-type")
+        req.httpBody = data
+        URLSession.shared.dataTask(with: req).resume()
     }
 
     func removeSession(id: String) {
@@ -1317,15 +1341,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.orderOut(nil)
     }
 
-    // Esc / Dismiss: closes the current session tab; empty POST /reply so the
-    // agent does not block on the hook. Other parallel sessions stay open.
+    // Esc / Dismiss: closes the current session tab. For the legacy
+    // hook-stdout path (cursor/codex/opencode) we POST an empty /reply so
+    // the long-poll waiter wakes immediately. For the pre-queue path
+    // (claude-code) we POST /reply/dismiss so any extended engage window
+    // stops blocking the terminal. Other parallel sessions stay open.
     func cancel() {
         guard let s = state.selectedSession else {
             state.removeAllSessions()
             hide()
             return
         }
-        if let rid = s.requestId {
+        if s.replyChannel == "hook-stdout-queue" {
+            postDismiss(sessionId: s.id)
+        } else if let rid = s.requestId {
             postReply(body: ["request_id": rid, "text": ""])
         }
         let sid = s.id
@@ -1348,7 +1377,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Conversations window's per-cwd toggle.
         CrierEmitCore.setSessionDisabled(s.id, cwd: s.cwd ?? "")
 
-        if let rid = s.requestId {
+        if s.replyChannel == "hook-stdout-queue" {
+            postDismiss(sessionId: s.id)
+        } else if let rid = s.requestId {
             postReply(body: ["request_id": rid, "text": ""])
         }
         let sid = s.id
@@ -1363,6 +1394,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func postReply(body: [String: Any]) {
         guard let url = URL(string: "\(endpoint)/reply"),
               let data = try? JSONSerialization.data(withJSONObject: body) else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "content-type")
+        req.httpBody = data
+        URLSession.shared.dataTask(with: req).resume()
+    }
+
+    /// Pre-queue path dismiss. Clears any pending engage window on the
+    /// daemon so a sync claude-code Stop hook stops blocking the terminal.
+    private func postDismiss(sessionId: String) {
+        guard let url = URL(string: "\(endpoint)/reply/dismiss"),
+              let data = try? JSONSerialization.data(withJSONObject: ["session_id": sessionId]) else { return }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "content-type")
@@ -1456,13 +1499,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return lastTerminalApp ?? NSWorkspace.shared.frontmostApplication
         }()
 
+        // Route Send to the right endpoint:
+        //   • hook-stdout-queue (claude-code, pre-queue path) →
+        //     POST /reply/queue keyed on session_id. Wakes whichever
+        //     /reply/drain is currently parked (or stores the text for
+        //     the next drain to find).
+        //   • everything else → legacy POST /reply keyed on request_id.
+        let useQueueEndpoint = (s.replyChannel == "hook-stdout-queue")
+        let postPath = useQueueEndpoint ? "/reply/queue" : "/reply"
+
         var body: [String: Any] = ["text": text]
         body["session_id"] = s.id
-        if let r = s.requestId { body["request_id"] = r }
-        if let c = s.replyChannel { body["channel"] = c }
-        if let t = s.replyTarget { body["target"] = t }
+        if !useQueueEndpoint {
+            if let r = s.requestId { body["request_id"] = r }
+            if let c = s.replyChannel { body["channel"] = c }
+            if let t = s.replyTarget { body["target"] = t }
+        }
 
-        if let url = URL(string: "\(endpoint)/reply"),
+        if let url = URL(string: "\(endpoint)\(postPath)"),
            let data = try? JSONSerialization.data(withJSONObject: body) {
             var req = URLRequest(url: url)
             req.httpMethod = "POST"
@@ -1485,7 +1539,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let channel = s.replyChannel
-        let keystrokePath = channel != "hook-stdout" && channel != "tmux" && channel != "http-poll"
+        let keystrokePath = channel != "hook-stdout"
+            && channel != "hook-stdout-queue"
+            && channel != "tmux"
+            && channel != "http-poll"
         let removedId = s.id
         state.removeSession(id: removedId)
         if state.sessions.isEmpty {

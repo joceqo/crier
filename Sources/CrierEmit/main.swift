@@ -183,6 +183,12 @@ let title = "\(prettyAgentName(agent)) · \(URL(fileURLWithPath: cwd).lastPathCo
 // UI POSTs an empty /reply, this hook returns without decision JSON, and
 // Claude Code falls through to its normal prompt.
 let blockingEvent = (event == "turn_done")
+// Claude Code uses the pre-queue path (mirrors Superwhisper's claude-hook):
+// short initial drain on session_id, no fixed long-poll ceiling, terminal
+// stays free, no "Stop hook error" UI label. Other agents keep the legacy
+// request_id-based /reply long-poll because their UIs / hook ergonomics
+// already work with it.
+let useQueueDrain = blockingEvent && agent == "claude-code"
 let requestId = UUID().uuidString
 
 var payload: [String: Any] = [
@@ -197,8 +203,10 @@ var payload: [String: Any] = [
 ]
 if let tmuxBlob = tmuxBlob { payload["tmux"] = tmuxBlob }
 if blockingEvent {
+    // request_id is still useful for diagnostics on both paths even when
+    // the queue path keys on session_id rather than request_id.
     payload["request_id"] = requestId
-    payload["reply_channel"] = "hook-stdout"
+    payload["reply_channel"] = useQueueDrain ? "hook-stdout-queue" : "hook-stdout"
 } else {
     if let replyChannel = replyChannel { payload["reply_channel"] = replyChannel }
     if let replyTarget = replyTarget { payload["reply_target"] = replyTarget }
@@ -278,6 +286,33 @@ func longPollReply(requestId: String, waitSeconds: Int) -> String? {
     return result.value
 }
 
+/// Pre-queue drain. Used by claude-code's blocking Stop hook (mirrors
+/// Superwhisper's claude-hook short poll). Returns immediately if the user
+/// already queued a reply during the turn; otherwise waits up to
+/// `baseWaitMs` (extended on the daemon side while the engage flag is in
+/// the future). Empty result → no reply, hook exits 0.
+func drainReplyQueue(sessionId: String, baseWaitMs: Int) -> String? {
+    guard let url = URL(string: "\(crierBase)/reply/drain?session_id=\(sessionId)&wait_ms=\(baseWaitMs)") else { return nil }
+    var req = URLRequest(url: url)
+    // Engage extensions can push the actual wait well past baseWaitMs, so
+    // give the URLSession a generous ceiling. 540 s matches the legacy
+    // long-poll cap and is enough for any "user is actively typing"
+    // session.
+    req.timeoutInterval = 600
+    let result = MutableBox<String?>(nil)
+    let sem = DispatchSemaphore(value: 0)
+    URLSession.shared.dataTask(with: req) { data, response, _ in
+        if let http = response as? HTTPURLResponse, http.statusCode == 200,
+           let data = data, !data.isEmpty,
+           let s = String(data: data, encoding: .utf8) {
+            result.value = s
+        }
+        sem.signal()
+    }.resume()
+    _ = sem.wait(timeout: .now() + .seconds(610))
+    return result.value
+}
+
 log("start: agent=\(agent) event=\(event) blocking=\(blockingEvent) request_id=\(requestId)")
 log("cwd=\(cwd) tmux_pane=\(env["TMUX_PANE"] ?? "-")")
 
@@ -348,15 +383,25 @@ postEvent(payloadData)
 log("posted event (\(payloadData.count) bytes)")
 
 if blockingEvent {
-    // Long-poll the daemon for the user's reply via the overlay. The TTY
-    // readline fallback that used to race this was removed because it
-    // leaked terminal escape sequences (focus events, mouse motion) into
-    // the visible terminal whenever Claude's TUI had the tty in raw mode.
-    // The earlier `uiAlive()` short-circuit guarantees a UI is connected
-    // before we get here, so an unanswered long-poll only happens when
-    // the user explicitly dismisses the panel without typing.
-    log("waiting for overlay reply (request_id=\(requestId))")
-    let replyText = longPollReply(requestId: requestId, waitSeconds: 540)
+    // Wait for the user's reply. Two paths:
+    //   • claude-code → /reply/drain on session_id with a short initial
+    //     window. The user can pre-queue during the turn, or start typing
+    //     after the hook fires (the daemon extends the wait via /reply/engage).
+    //     Empty drain → exit 0, terminal continues normally.
+    //   • everyone else → legacy /reply long-poll on request_id.
+    // The TTY readline fallback that used to race this was removed because
+    // it leaked terminal escape sequences (focus events, mouse motion)
+    // into the visible terminal whenever the agent's TUI had the tty in
+    // raw mode. The earlier `uiAlive()` short-circuit guarantees a UI is
+    // connected before we get here.
+    let replyText: String?
+    if useQueueDrain {
+        log("draining reply queue (session_id=\(fullSessionId))")
+        replyText = drainReplyQueue(sessionId: fullSessionId, baseWaitMs: 3000)
+    } else {
+        log("waiting for overlay reply (request_id=\(requestId))")
+        replyText = longPollReply(requestId: requestId, waitSeconds: 540)
+    }
     log("reply from overlay: \(String(replyText?.prefix(80) ?? "nil"))")
 
     if let reply = replyText, !reply.isEmpty {

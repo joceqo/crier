@@ -138,7 +138,7 @@ final class CrierE2ETests: XCTestCase {
         // would hang for 540s waiting on the hook's long-poll.
         _ = eventSem.wait(timeout: .now() + 80)
         let event = try XCTUnwrap(received, "no turn_done event received within timeout — hook may not be configured or crier-emit may not be installed")
-        if let rid = event["request_id"] as? String { releaseStopHook(requestId: rid) }
+        if let sid = event["session_id"] as? String { releaseStopHook(sessionId: sid) }
 
         p.waitUntilExit()
 
@@ -148,15 +148,17 @@ final class CrierE2ETests: XCTestCase {
         XCTAssertTrue(message.contains(marker), "expected '\(marker)' in message but got: \(message.prefix(200))")
     }
 
-    // Claude Code's Stop hook is now blocking + hook-stdout, matching
-    // Cursor/Codex/OpenCode and Superwhisper's claude-hook. This test
-    // verifies the new contract end-to-end with a real `claude` binary:
+    // Claude Code's Stop hook now uses the pre-queue path (see
+    // crier-prequeue-architecture.md): blocking + hook-stdout-queue +
+    // session_id-keyed drain. Mirrors Superwhisper's claude-hook shape.
+    // This test verifies the contract end-to-end with a real `claude` binary:
     //   1. `claude -p` finishes its turn and fires the Stop hook
-    //   2. crier-emit posts the event with request_id + reply_channel
-    //   3. test sends an empty /reply (the UI's Dismiss path) to release
+    //   2. crier-emit posts the event with reply_channel=hook-stdout-queue
+    //      and parks on /reply/drain keyed by session_id
+    //   3. test sends /reply/dismiss (the UI's Dismiss path) to release
     //      the hook so claude exits cleanly without consuming a decision
     //      reason as the next prompt
-    func testClaudeCodeStopHookAdvertisesHookStdoutReply() throws {
+    func testClaudeCodeStopHookAdvertisesQueueDrainReply() throws {
         try requireE2E()
         let claudePath = try requireBinary("claude")
 
@@ -186,12 +188,12 @@ final class CrierE2ETests: XCTestCase {
         // Wait for the event, then release the hook so claude can finish.
         _ = eventSem.wait(timeout: .now() + 75)
         let event = try XCTUnwrap(received, "Stop hook did not POST a turn_done event within 75s")
-        let rid = try XCTUnwrap(event["request_id"] as? String,
-            "claude-code turn_done must advertise a request_id (hook is now blocking)")
-        XCTAssertEqual(event["reply_channel"] as? String, "hook-stdout",
-                       "claude-code turn_done must advertise hook-stdout as the reply channel")
+        let sid = try XCTUnwrap(event["session_id"] as? String,
+            "claude-code turn_done must advertise a session_id (queue path keys on it)")
+        XCTAssertEqual(event["reply_channel"] as? String, "hook-stdout-queue",
+                       "claude-code turn_done must advertise hook-stdout-queue as the reply channel")
 
-        releaseStopHook(requestId: rid)
+        releaseStopHook(sessionId: sid)
 
         let exited = waitForProcess(p, timeoutSeconds: 30)
         let elapsed = Date().timeIntervalSince(start)
@@ -201,15 +203,15 @@ final class CrierE2ETests: XCTestCase {
         }
     }
 
-    /// POST /reply with empty text — same payload the Crier UI sends when
-    /// the user hits Dismiss. crier-emit treats it as "user wants to type
-    /// in the terminal" and exits without printing decision:block.
-    private func releaseStopHook(requestId: String) {
-        guard let url = URL(string: "http://127.0.0.1:\(Self.port)/reply") else { return }
+    /// POST /reply/dismiss — same payload the Crier UI sends when the user
+    /// hits Dismiss on a queue-path session. Releases any parked /reply/drain
+    /// with no content, so crier-emit exits without printing decision:block.
+    private func releaseStopHook(sessionId: String) {
+        guard let url = URL(string: "http://127.0.0.1:\(Self.port)/reply/dismiss") else { return }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "content-type")
-        req.httpBody = try? JSONSerialization.data(withJSONObject: ["request_id": requestId, "text": ""])
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["session_id": sessionId])
         req.timeoutInterval = 5
         let sem = DispatchSemaphore(value: 0)
         URLSession.shared.dataTask(with: req) { _, _, _ in sem.signal() }.resume()

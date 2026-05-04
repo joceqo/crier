@@ -127,22 +127,17 @@ enum Installer {
         var hooks = (json["hooks"] as? [String: Any]) ?? [:]
         // Stop / Notification / PermissionRequest / PreToolUse / UserPromptSubmit.
         // Schema mirrors install-local-claude-code.sh — kept in sync deliberately.
-        // `async: true` keeps the terminal usable while crier-emit long-polls
-        // /reply — without it Claude Code blocks waiting for the hook to
-        // return, so the user can't type in the terminal until they hit
-        // Dismiss in Crier. async hooks still honour `decision:block` (it
-        // arrives in the transcript as `async_hook_response` and is injected
-        // as the next user prompt).
-        // `timeout: 540` matches crier-emit's longPollReply window so the
-        // reply-wait isn't truncated. The earlier `timeout: 30` was a
-        // leftover from when claude-code was fire-and-forget; under the
-        // blocking-long-poll path it dropped any reply that took >30s.
+        // No `async` or `timeout` on Stop: under the pre-queue architecture
+        // (see crier-prequeue-architecture.md) crier-emit drains its reply
+        // queue with a short ~3 s initial window and only extends while the
+        // user is actively engaging the overlay. That matches Superwhisper's
+        // Stop-hook shape (sync, no fixed ceiling) and avoids the
+        // "Stop hook error" UI label that fired every time decision:block
+        // landed under the previous async+timeout config.
         hooks["Stop"] = stripCrierAndAppend(
             hooks["Stop"] as? [[String: Any]],
             entry: ["hooks": [["type": "command",
-                               "command": "\(emit) claude-code turn_done",
-                               "async": true,
-                               "timeout": 540]]]
+                               "command": "\(emit) claude-code turn_done"]]]
         )
         hooks["Notification"] = stripCrierAndAppend(
             hooks["Notification"] as? [[String: Any]],

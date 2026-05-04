@@ -196,6 +196,122 @@ final class CrierServerTests: XCTestCase {
         XCTAssertEqual(resp.statusCode, 204)
     }
 
+    // MARK: - pre-queue (/reply/queue, /reply/engage, /reply/drain)
+
+    /// Reply queued before any drain parks → the next drain returns it
+    /// immediately. Mirrors Superwhisper's "user pre-talked, hook drains"
+    /// case.
+    func testReplyQueueDrainImmediate() {
+        let sid = "test-queue-immediate-\(UUID().uuidString)"
+        post("/reply/queue", body: ["session_id": sid, "text": "hello queue"])
+        guard let (data, resp) = get("/reply/drain?session_id=\(sid)&wait_ms=500", timeout: 3) else {
+            return XCTFail("no response")
+        }
+        XCTAssertEqual(resp.statusCode, 200)
+        XCTAssertEqual(String(data: data, encoding: .utf8), "hello queue")
+    }
+
+    /// Drain parks first, then a queue POST wakes it.
+    func testReplyDrainWaitsForQueue() {
+        let sid = "test-drain-waits-\(UUID().uuidString)"
+        var drainResult: (Data, HTTPURLResponse)?
+        let sem = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            drainResult = self.get("/reply/drain?session_id=\(sid)&wait_ms=2000", timeout: 4)
+            sem.signal()
+        }
+        Thread.sleep(forTimeInterval: 0.1)
+        post("/reply/queue", body: ["session_id": sid, "text": "lands while waiting"])
+
+        _ = sem.wait(timeout: .now() + 5)
+        guard let (data, resp) = drainResult else { return XCTFail("no response") }
+        XCTAssertEqual(resp.statusCode, 200)
+        XCTAssertEqual(String(data: data, encoding: .utf8), "lands while waiting")
+    }
+
+    /// /reply/engage extends a drain past its initial window. Without the
+    /// engage POST, the 300 ms drain would time out before the 800 ms-late
+    /// queue arrives.
+    func testReplyDrainEngageExtends() {
+        let sid = "test-drain-engage-\(UUID().uuidString)"
+        var drainResult: (Data, HTTPURLResponse)?
+        let sem = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            drainResult = self.get("/reply/drain?session_id=\(sid)&wait_ms=300", timeout: 5)
+            sem.signal()
+        }
+        Thread.sleep(forTimeInterval: 0.1)
+        post("/reply/engage", body: ["session_id": sid, "extend_seconds": 3])
+        // Land the queue text well after the original 300 ms window
+        // would have lapsed — must still be delivered.
+        Thread.sleep(forTimeInterval: 0.8)
+        post("/reply/queue", body: ["session_id": sid, "text": "delivered after engage"])
+
+        _ = sem.wait(timeout: .now() + 6)
+        guard let (data, resp) = drainResult else { return XCTFail("no response") }
+        XCTAssertEqual(resp.statusCode, 200)
+        XCTAssertEqual(String(data: data, encoding: .utf8), "delivered after engage")
+    }
+
+    /// No queue, no engage → drain returns 204 after the base wait.
+    func testReplyDrainTimeoutReturns204() {
+        let sid = "test-drain-timeout-\(UUID().uuidString)"
+        guard let (_, resp) = get("/reply/drain?session_id=\(sid)&wait_ms=200", timeout: 3) else {
+            return XCTFail("no response")
+        }
+        XCTAssertEqual(resp.statusCode, 204)
+    }
+
+    /// /reply/dismiss must release a parked drain immediately, even if a
+    /// long engage extension is still in flight. Without this, a sync
+    /// claude-code Stop hook would keep the terminal blocked for the rest
+    /// of the engage window after the user clicked Dismiss.
+    func testReplyDismissReleasesParkedDrain() {
+        let sid = "test-drain-dismiss-\(UUID().uuidString)"
+        var drainResult: (Data, HTTPURLResponse)?
+        let sem = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            drainResult = self.get("/reply/drain?session_id=\(sid)&wait_ms=2000", timeout: 4)
+            sem.signal()
+        }
+        Thread.sleep(forTimeInterval: 0.1)
+        // Long engage so the drain wouldn't time out on its own in time.
+        post("/reply/engage", body: ["session_id": sid, "extend_seconds": 30])
+        Thread.sleep(forTimeInterval: 0.05)
+        post("/reply/dismiss", body: ["session_id": sid])
+
+        _ = sem.wait(timeout: .now() + 4)
+        guard let (_, resp) = drainResult else { return XCTFail("no response") }
+        XCTAssertEqual(resp.statusCode, 204)
+    }
+
+    /// POST /event with event=="dismiss" must drop any pending queued reply
+    /// for that session — UserPromptSubmit firing means the user moved on,
+    /// and a stale queue would otherwise fire on the next turn.
+    func testDismissEventClearsPendingQueue() {
+        let sid = "test-dismiss-clears-\(UUID().uuidString)"
+        post("/reply/queue", body: ["session_id": sid, "text": "stale"])
+        // dismiss event arrives — should wipe the queued text.
+        post("/event", body: ["agent": "claude-code", "event": "dismiss", "session_id": sid])
+        // Drain should now time out instead of returning the stale text.
+        guard let (_, resp) = get("/reply/drain?session_id=\(sid)&wait_ms=200", timeout: 3) else {
+            return XCTFail("no response")
+        }
+        XCTAssertEqual(resp.statusCode, 204)
+    }
+
+    /// Empty queue text is dropped — UI's "Send" button is already disabled
+    /// when the draft is empty, but a stray POST must not fire a phantom
+    /// decision:block.
+    func testReplyQueueDropsEmptyText() {
+        let sid = "test-queue-empty-\(UUID().uuidString)"
+        post("/reply/queue", body: ["session_id": sid, "text": ""])
+        guard let (_, resp) = get("/reply/drain?session_id=\(sid)&wait_ms=200", timeout: 3) else {
+            return XCTFail("no response")
+        }
+        XCTAssertEqual(resp.statusCode, 204)
+    }
+
     /// End-to-end: POST /reply with channel=tmux must run `tmux send-keys` and
     /// land the text inside the target pane. Spawns a real detached tmux
     /// session running `cat` so keystrokes echo back into the pane buffer,
