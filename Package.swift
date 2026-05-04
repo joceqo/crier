@@ -15,7 +15,6 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
-        .package(url: "https://github.com/zats/permiso.git", branch: "main"),
         .package(url: "https://github.com/madebywindmill/MarkdownToAttributedString.git", branch: "main"),
         .package(url: "https://github.com/JohnSundell/Splash.git", from: "0.16.0"),
     ],
@@ -44,7 +43,6 @@ let package = Package(
             dependencies: [
                 "CrierEmitCore",
                 "CrierServer",
-                .product(name: "Permiso", package: "permiso"),
                 .product(name: "MarkdownToAttributedString", package: "MarkdownToAttributedString"),
                 .product(name: "Splash", package: "Splash"),
             ],

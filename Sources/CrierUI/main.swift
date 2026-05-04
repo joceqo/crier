@@ -4,7 +4,6 @@ import CoreGraphics
 import CrierEmitCore
 import CrierServer
 import MarkdownToAttributedString
-import Permiso
 import SwiftUI
 
 // crier-ui — floating overlay panel.
@@ -41,24 +40,14 @@ private func uiLog(_ msg: String) {
     }
 }
 
-// Trigger the Accessibility permission flow. If untrusted, hand off to permiso
-// (https://github.com/zats/permiso) which opens System Settings to the right
-// pane and overlays a draggable Crier.app icon over the Settings window — the
-// user drags it directly into the Accessibility list.
-@discardableResult
-private func ensureAccessibilityPermission() -> Bool {
-    let trusted = AXIsProcessTrusted()
-    if trusted { return true }
-    DispatchQueue.main.async {
-        PermisoAssistant.shared.present(panel: .accessibility)
-    }
-    return false
-}
-
-// Post a string to whatever app is frontmost, then press Return. Used when the
-// event has no `reply_channel` (i.e. the agent isn't in tmux). Each character
-// goes through CGEventKeyboardSetUnicodeString with virtualKey 0, which is the
-// canonical "type this Unicode regardless of keyboard layout" trick.
+// Post a string to whatever app is frontmost, then press Return. Legacy
+// fallback for events without a `reply_channel` — every supported agent now
+// uses hook-stdout / tmux / http-poll, so this path is rarely hit. When it
+// is hit and the user hasn't manually granted Accessibility, CGEventPost is
+// silently filtered and the failure shows up in ~/.claude/crier-ui.log via
+// the POST /reply completion handler. Each character goes through
+// CGEventKeyboardSetUnicodeString with virtualKey 0, the canonical
+// "type this Unicode regardless of keyboard layout" trick.
 private func postKeystrokes(_ text: String, pressReturn: Bool = true) {
     guard let source = CGEventSource(stateID: .hidSystemState) else { return }
     for ch in text {
@@ -1268,7 +1257,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        ensureAccessibilityPermission()
         subscriberTask = Task { [weak self] in await self?.subscribeLoop() }
 
         // First-launch (or post-move) setup prompt. If any detected agent
