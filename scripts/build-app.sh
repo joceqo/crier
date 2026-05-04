@@ -20,16 +20,31 @@ APP="$REPO_DIR/Crier.app"
 command -v swift    >/dev/null || { echo "Swift toolchain required" >&2; exit 1; }
 command -v codesign >/dev/null || { echo "codesign required (Xcode CLT)" >&2; exit 1; }
 
-echo "==> Building crier-ui (release)"
-( cd "$REPO_DIR" && swift build -c release --product crier-ui )
+echo "==> Building crier-ui + crier-emit (release)"
+( cd "$REPO_DIR" && swift build -c release --product crier-ui --product crier-emit )
 
 BIN="$REPO_DIR/.build/release/crier-ui"
-test -x "$BIN" || { echo "build did not produce $BIN" >&2; exit 1; }
+EMIT_BIN="$REPO_DIR/.build/release/crier-emit"
+test -x "$BIN"      || { echo "build did not produce $BIN" >&2; exit 1; }
+test -x "$EMIT_BIN" || { echo "build did not produce $EMIT_BIN" >&2; exit 1; }
 
 echo "==> Assembling $APP"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Resources/bin"
 cp "$BIN" "$APP/Contents/MacOS/Crier"
+# crier-emit lives inside the bundle so hook configs can reference it by an
+# absolute, stable path: /Applications/Crier.app/Contents/Resources/bin/crier-emit.
+# No /usr/local/bin pollution, no sudo at install time.
+cp "$EMIT_BIN" "$APP/Contents/Resources/bin/crier-emit"
+
+# Bundle the Claude Code skill + slash command markdown so the in-app
+# Installer can copy them into ~/.claude/skills/ and ~/.claude/commands/.
+mkdir -p "$APP/Contents/Resources/agent-assets/claude-skills/crier" \
+         "$APP/Contents/Resources/agent-assets/claude-commands"
+cp "$REPO_DIR/assets/claude-skills/crier/SKILL.md" \
+   "$APP/Contents/Resources/agent-assets/claude-skills/crier/SKILL.md"
+cp "$REPO_DIR/assets/claude-commands/crier.md" \
+   "$APP/Contents/Resources/agent-assets/claude-commands/crier.md"
 
 # Generate AppIcon.icns from the SF Symbol "megaphone.fill" on a brand-orange
 # tile. make-icon.swift renders a Crier.iconset of PNGs at the required
@@ -57,8 +72,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleExecutable</key>          <string>Crier</string>
   <key>CFBundleIconFile</key>            <string>AppIcon</string>
   <key>CFBundlePackageType</key>         <string>APPL</string>
-  <key>CFBundleVersion</key>             <string>0.0.1</string>
-  <key>CFBundleShortVersionString</key>  <string>0.0.1</string>
+  <key>CFBundleVersion</key>             <string>0.2.0</string>
+  <key>CFBundleShortVersionString</key>  <string>0.2.0</string>
   <key>LSMinimumSystemVersion</key>      <string>14.0</string>
   <key>LSUIElement</key>                 <true/>
   <key>NSHumanReadableCopyright</key>    <string>Crier — local agent overlay</string>

@@ -1028,6 +1028,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem?
     var statusDisableItem: NSMenuItem?
     var conversationsWindow: NSWindow?
+    var setupWindow: NSWindow?
     // First show pins to screen bottom-right; subsequent shows keep
     // wherever the user dragged the panel. Resizes also avoid re-anchoring,
     // so a growing message doesn't snap the window back.
@@ -1079,6 +1080,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let menu = NSMenu()
+
+        let setupItem = NSMenuItem(
+            title: "Setup…",
+            action: #selector(openSetupWindow(_:)),
+            keyEquivalent: ""
+        )
+        setupItem.target = self
+        menu.addItem(setupItem)
 
         let conversationsItem = NSMenuItem(
             title: "Conversations…",
@@ -1159,6 +1168,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    // Setup window — same lazy/single-instance pattern as the Conversations
+    // window. Auto-shown on first launch when any detected agent isn't wired
+    // (see applicationDidFinishLaunching), also reachable from the status
+    // menu's "Setup…" item.
+    @objc func openSetupWindow(_ sender: Any?) {
+        if let w = setupWindow {
+            w.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let w = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 540, height: 380),
+            styleMask: [.titled, .closable, .miniaturizable],
+            backing: .buffered,
+            defer: false
+        )
+        let hosting = NSHostingController(rootView: SetupView { [weak w] in
+            w?.close()
+        })
+        w.contentViewController = hosting
+        w.title = "Crier — Setup"
+        w.center()
+        w.isReleasedWhenClosed = false
+        setupWindow = w
+        w.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
     private func refreshGlobalDisableState() {
         let isDisabled = FileManager.default.fileExists(atPath: crierGlobalDisabledPath)
         statusDisableItem?.title = isDisabled
@@ -1230,6 +1267,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         ensureAccessibilityPermission()
         subscriberTask = Task { [weak self] in await self?.subscribeLoop() }
+
+        // First-launch (or post-move) setup prompt. If any detected agent
+        // isn't wired up to point at *this* Crier.app, pop the Setup window
+        // so the user sees one-click "Install Selected" instead of an inert
+        // menu-bar icon. Cheap to call — pure file checks.
+        if Installer.anyAgentNeedsSetup() {
+            DispatchQueue.main.async { [weak self] in
+                self?.openSetupWindow(nil)
+            }
+        }
     }
 
     func isValidKeystrokeTarget(_ app: NSRunningApplication) -> Bool {
