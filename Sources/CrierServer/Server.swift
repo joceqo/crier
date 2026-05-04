@@ -140,7 +140,12 @@ private final class ReplyHub: @unchecked Sendable {
 
 // MARK: - HTTP handler
 
-private final class CrierHTTPHandler: ChannelInboundHandler {
+// `@unchecked Sendable` because NIO confines handler instances to their
+// channel's event loop — `requestHead`/`bodyBuffer` are only ever touched
+// from that single thread, and `whenComplete` callbacks hop back to the
+// same loop. We need the conformance for ServerBootstrap's @Sendable
+// childChannelInitializer and for capturing self in future callbacks.
+private final class CrierHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
 
@@ -197,6 +202,11 @@ private final class CrierHTTPHandler: ChannelInboundHandler {
         }
 
         let httpVersion = head.version
+        // NIOLoopBound lets us carry the non-Sendable ChannelHandlerContext
+        // into the @Sendable whenComplete callback — it asserts at runtime
+        // that .value is only read on the original event loop, which is
+        // exactly where whenComplete fires.
+        let boundContext = NIOLoopBound(context, eventLoop: context.eventLoop)
         responseFuture.whenComplete { [weak self] result in
             guard let self else { return }
             let (status, contentType, body): (HTTPResponseStatus, String, String)
@@ -204,7 +214,7 @@ private final class CrierHTTPHandler: ChannelInboundHandler {
             case .success(let r): (status, contentType, body) = r
             case .failure: (status, contentType, body) = (.internalServerError, "application/json", #"{"error":"internal"}"#)
             }
-            self.writeResponse(context: context, requestVersion: httpVersion, status: status, contentType: contentType, body: body)
+            self.writeResponse(context: boundContext.value, requestVersion: httpVersion, status: status, contentType: contentType, body: body)
         }
 
         self.requestHead = nil
@@ -223,8 +233,9 @@ private final class CrierHTTPHandler: ChannelInboundHandler {
         let responseHead = HTTPResponseHead(version: requestVersion, status: status, headers: headers)
         context.write(self.wrapOutboundOut(.head(responseHead)), promise: nil)
         context.write(self.wrapOutboundOut(.body(.byteBuffer(responseBuffer))), promise: nil)
+        let boundContext = NIOLoopBound(context, eventLoop: context.eventLoop)
         context.writeAndFlush(self.wrapOutboundOut(.end(nil))).whenComplete { _ in
-            context.close(promise: nil)
+            boundContext.value.close(promise: nil)
         }
     }
 

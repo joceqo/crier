@@ -222,72 +222,89 @@ export const Crier: Plugin = async ({ directory, worktree, client }) => {
         return
       }
 
-      // Block the OpenCode event handler on the user's reply. SW's plugin uses
-      // a polled response file for this; we use HTTP long-poll against the
-      // daemon. The daemon returns 200+text once the UI POSTs /reply for our
-      // request_id, or 204 on timeout.
-      log("long-poll /reply start", { requestId, waitSec: REPLY_TIMEOUT_SEC })
-      let replyText: string | null = null
-      try {
-        const res = await fetch(
-          `${ENDPOINT}/reply?request_id=${encodeURIComponent(requestId)}&wait=${REPLY_TIMEOUT_SEC}`,
-        )
-        log("/reply response", { status: res.status, requestId })
-        if (res.status === 200) replyText = await res.text()
-      } catch (err) {
-        log("/reply long-poll threw", err)
-        return
-      }
-      if (replyText == null) {
-        log("/reply timeout — no user reply", { requestId })
-        return
-      }
-      const trimmed = replyText.trim()
-      if (!trimmed) {
-        log("/reply returned empty body — dropping", { requestId })
-        return
-      }
-      log("reply received", { requestId, len: trimmed.length, preview: trimmed.slice(0, 160) })
-
+      // Fire-and-forget the long-poll so the event handler returns
+      // immediately. The previous version awaited the long-poll inline,
+      // which blocked OpenCode's plugin pipeline for up to REPLY_TIMEOUT_SEC
+      // and made it impossible for the user to type into the OpenCode TUI
+      // while the Crier panel was up. By detaching the long-poll, OpenCode
+      // is free to start a new turn the moment the user types — and if the
+      // panel is later answered, the reply is injected as the next user
+      // message via `session.promptAsync`.
+      //
+      // If the user *also* started a new turn before answering the panel,
+      // the in-flight reply is still injected as a follow-up message —
+      // visually the same as the user typing two prompts in a row, which
+      // is acceptable. The alternative (cancellation) requires per-session
+      // bookkeeping that's not worth the complexity for this race.
       const query = directory ? { directory } : undefined
+      const permId =
+        kind === "needs_permission" && typeof e.properties?.id === "string"
+          ? e.properties.id
+          : undefined
 
-      if (kind === "needs_permission") {
-        const permId = e.properties?.id
-        if (typeof permId === "string" && permId.length > 0) {
-          const response = mapPermissionTextToResponse(trimmed)
-          if (response) {
-            try {
-              await client.postSessionIdPermissionsPermissionId({
-                path: { id: sessionId, permissionID: permId },
-                query,
-                body: { response },
-              })
-              log("permission response posted", { sessionId, permId, response })
-            } catch (err) {
-              log("permission response threw", err)
+      log("long-poll /reply detached", { requestId, waitSec: REPLY_TIMEOUT_SEC })
+      ;(async () => {
+        let replyText: string | null = null
+        try {
+          const res = await fetch(
+            `${ENDPOINT}/reply?request_id=${encodeURIComponent(requestId)}&wait=${REPLY_TIMEOUT_SEC}`,
+          )
+          log("/reply response", { status: res.status, requestId })
+          if (res.status === 200) replyText = await res.text()
+        } catch (err) {
+          log("/reply long-poll threw", err)
+          return
+        }
+        if (replyText == null) {
+          log("/reply timeout — no user reply", { requestId })
+          return
+        }
+        const trimmed = replyText.trim()
+        if (!trimmed) {
+          log("/reply returned empty body — dropping", { requestId })
+          return
+        }
+        log("reply received", { requestId, len: trimmed.length, preview: trimmed.slice(0, 160) })
+
+        if (kind === "needs_permission") {
+          if (permId) {
+            const response = mapPermissionTextToResponse(trimmed)
+            if (response) {
+              try {
+                await client.postSessionIdPermissionsPermissionId({
+                  path: { id: sessionId, permissionID: permId },
+                  query,
+                  body: { response },
+                })
+                log("permission response posted", { sessionId, permId, response })
+              } catch (err) {
+                log("permission response threw", err)
+              }
+            } else {
+              log("permission reply text did not map to a response", { trimmed: trimmed.slice(0, 80) })
             }
           } else {
-            log("permission reply text did not map to a response", { trimmed: trimmed.slice(0, 80) })
+            log("permission event missing id property — cannot answer", {
+              propertyKeys: Object.keys(e.properties ?? {}),
+            })
           }
-        } else {
-          log("permission event missing id property — cannot answer", { propertyKeys: Object.keys(e.properties ?? {}) })
+          return
         }
-        return
-      }
 
-      // turn_done — inject user text as the next user message and resume the agent.
-      try {
-        await client.session.promptAsync({
-          path: { id: sessionId },
-          query,
-          body: {
-            parts: [{ type: "text", text: trimmed }],
-          },
-        })
-        log("session.promptAsync delivered reply", { sessionId, requestId })
-      } catch (err) {
-        log("session.promptAsync threw", err)
-      }
+        // turn_done — inject user text as the next user message and resume the agent.
+        try {
+          await client.session.promptAsync({
+            path: { id: sessionId },
+            query,
+            body: {
+              parts: [{ type: "text", text: trimmed }],
+            },
+          })
+          log("session.promptAsync delivered reply", { sessionId, requestId })
+        } catch (err) {
+          log("session.promptAsync threw", err)
+        }
+      })().catch((err) => log("detached long-poll task threw", err))
     },
   }
 }

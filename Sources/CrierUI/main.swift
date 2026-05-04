@@ -255,7 +255,7 @@ struct DisableSessionDialog: View {
             }
             .padding(20)
             .frame(width: 360)
-            .crierCard(cornerRadius: 18, shadowRadius: 24)
+            .crierCard(cornerRadius: 18)
         }
     }
 
@@ -490,10 +490,9 @@ struct WindowDragRegion: NSViewRepresentable {
 // Each visible element (badge pill, message card, input card) gets this:
 // - .menu material (light translucent), behind-window blending so the
 //   terminal text is visible through it.
-// - Rounded corners.
-// - Drop shadow for the "floating" feel SW's UI has.
+// - Rounded corners with a hairline stroke for edge definition.
 extension View {
-    func crierCard(cornerRadius: CGFloat = 14, shadowRadius: CGFloat = 18) -> some View {
+    func crierCard(cornerRadius: CGFloat = 14) -> some View {
         self
             .background {
                 VisualEffectView(material: .menu, blendingMode: .behindWindow)
@@ -503,8 +502,6 @@ extension View {
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .strokeBorder(.white.opacity(0.06), lineWidth: 1)
             )
-            .compositingGroup()
-            .shadow(color: .black.opacity(0.28), radius: shadowRadius, x: 0, y: 6)
     }
 }
 
@@ -566,7 +563,7 @@ struct AgentBadge: View {
         .background(WindowDragRegion())
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
-        .crierCard(cornerRadius: 100, shadowRadius: 10)
+        .crierCard(cornerRadius: 100)
         .onHover { hovered = $0 }
     }
 
@@ -879,7 +876,7 @@ struct CrierPanelView: View {
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 9)
                         .padding(.vertical, 4)
-                        .crierCard(cornerRadius: 100, shadowRadius: 8)
+                        .crierCard(cornerRadius: 100)
                 }
             }
 
@@ -1022,7 +1019,8 @@ final class CrierBorderlessPanel: NSPanel {
 // and the panel never pops. The status item toggles this file.
 private let crierGlobalDisabledPath = "/tmp/crier-agent/disabled-global"
 
-final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
     let state = CrierState()
     var panel: NSPanel!
     var subscriberTask: Task<Void, Never>?
@@ -1030,6 +1028,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     var statusItem: NSStatusItem?
     var statusDisableItem: NSMenuItem?
     var conversationsWindow: NSWindow?
+    // First show pins to screen bottom-right; subsequent shows keep
+    // wherever the user dragged the panel. Resizes also avoid re-anchoring,
+    // so a growing message doesn't snap the window back.
+    var hasPositionedPanel = false
 
     // Install a minimal main menu — `.accessory` apps don't get one by default,
     // and without an Edit menu macOS doesn't route Cmd+C/V/X/A through the
@@ -1215,10 +1217,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             object: nil,
             queue: .main
         ) { [weak self] note in
-            guard let self,
-                  let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-                  self.isValidKeystrokeTarget(app) else { return }
-            self.lastTerminalApp = app
+            // Notification isn't Sendable, but we registered with queue: .main
+            // so we're already on the main thread. Filter using only Sendable
+            // primitives, then assumeIsolated to touch @MainActor state.
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            if app.processIdentifier == NSRunningApplication.current.processIdentifier { return }
+            if let id = app.bundleIdentifier, keystrokeTargetExclusions.contains(id) { return }
+            MainActor.assumeIsolated {
+                self?.lastTerminalApp = app
+            }
         }
 
         ensureAccessibilityPermission()
@@ -1242,8 +1249,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     // Resize the panel to match SwiftUI's reported ideal size. Width stays
     // pinned at 620 (the SwiftUI root sets it explicitly); height tracks
     // content but is clamped so a runaway message can't fill the screen.
-    // After resize we re-pin to bottom-right so the visible anchor doesn't
-    // jump when the panel grows.
+    // `setContentSize` keeps origin.y (the bottom edge in AppKit coords)
+    // fixed, so a growing message expands upward and the user's drag
+    // position is preserved.
     func applyContentSize(_ size: CGSize) {
         guard size.height > 0 else { return }
         let height = min(max(size.height, 120), 720)
@@ -1255,11 +1263,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         }
         uiLog("applyContentSize — reported=\(size) current=\(currentContent) → resizing to \(newSize)")
         panel.setContentSize(newSize)
-        if panel.isVisible { positionBottomRight() }
     }
 
     func showPanel() {
-        positionBottomRight()
+        if !hasPositionedPanel {
+            positionBottomRight()
+            hasPositionedPanel = true
+        }
         panel.orderFrontRegardless()
         panel.makeKey()
         uiLog("showPanel — frame=\(panel.frame) key=\(panel.isKeyWindow) visible=\(panel.isVisible)")

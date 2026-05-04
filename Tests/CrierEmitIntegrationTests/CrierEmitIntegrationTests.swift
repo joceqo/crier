@@ -287,13 +287,18 @@ final class CrierEmitIntegrationTests: XCTestCase {
         XCTAssertEqual(event["event"] as? String, "needs_permission")
     }
 
-    func testEmitTurnDoneDeliversReplyViaHookStdout() throws {
+    /// Claude Code Stop hook is installed with `async: true` (Claude Code
+    /// 2.1+), so crier-emit fires the event and exits immediately — no
+    /// long-poll, no decision:block JSON. Reply delivery happens out-of-band
+    /// via keystroke posting from the Crier UI. This test guards against
+    /// regressing back to the blocking path that froze the user's terminal.
+    func testEmitClaudeCodeTurnDoneIsNonBlockingAndPostsEvent() throws {
         guard !Self.emitBinaryPath.isEmpty else { throw XCTSkip("crier-emit binary not built") }
 
         let transcript = try makeTranscript(message: "What is 2+2?")
         let stdinPayload: [String: Any] = [
             "transcript_path": transcript.path,
-            "session_id": "reply-test-\(UUID().uuidString)",
+            "session_id": "claude-async-\(UUID().uuidString)",
             "cwd": "/tmp",
         ]
 
@@ -307,50 +312,28 @@ final class CrierEmitIntegrationTests: XCTestCase {
         }
         Thread.sleep(forTimeInterval: 0.05)
 
-        // Run crier-emit in background — it blocks on /reply after posting.
-        var emitOutput = ""
-        var emitDone = false
-        let emitSem = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
-            let (_, stdout, _) = self.runEmit(
-                agent: "claude-code",
-                event: "turn_done",
-                stdinPayload: stdinPayload
-            )
-            emitOutput = stdout
-            emitDone = true
-            emitSem.signal()
-        }
+        // crier-emit must return fast — under a second on a healthy system.
+        // Anything close to 540s indicates the blocking path is back.
+        let start = Date()
+        let (code, stdout, _) = runEmit(
+            agent: "claude-code",
+            event: "turn_done",
+            stdinPayload: stdinPayload
+        )
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertEqual(code, 0)
+        XCTAssertLessThan(elapsed, 5, "claude-code turn_done must not block — got \(elapsed)s")
+        XCTAssertTrue(stdout.isEmpty,
+                      "claude-code turn_done must not write decision:block JSON anymore (async hook ignores stdout); got: \(stdout)")
 
-        _ = eventSem.wait(timeout: .now() + 15)
-        guard let receivedRequestId = received?["request_id"] as? String else {
-            return XCTFail("event missing request_id")
-        }
-
-        // Deliver the reply.
-        guard let replyURL = URL(string: "\(Self.base)/reply") else { return }
-        var req = URLRequest(url: replyURL)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "content-type")
-        let replyBody: [String: Any] = [
-            "request_id": receivedRequestId,
-            "text": "The answer is 4",
-            "channel": "hook-stdout",
-        ]
-        req.httpBody = try JSONSerialization.data(withJSONObject: replyBody)
-        req.timeoutInterval = 5
-        let sem = DispatchSemaphore(value: 0)
-        URLSession.shared.dataTask(with: req) { _, _, _ in sem.signal() }.resume()
-        _ = sem.wait(timeout: .now() + 6)
-
-        _ = emitSem.wait(timeout: .now() + 10)
-        XCTAssertTrue(emitDone, "crier-emit should have exited after reply was delivered")
-
-        // stdout should contain decision:block JSON with the reply framed inside.
-        let parsed = (try? JSONSerialization.jsonObject(with: Data(emitOutput.utf8))) as? [String: Any]
-        XCTAssertEqual(parsed?["decision"] as? String, "block")
-        let reason = parsed?["reason"] as? String ?? ""
-        XCTAssertTrue(reason.contains("The answer is 4"), "reason should contain the reply text")
+        _ = eventSem.wait(timeout: .now() + 5)
+        let event = try XCTUnwrap(received, "event was not posted")
+        XCTAssertEqual(event["agent"] as? String, "claude-code")
+        XCTAssertEqual(event["event"] as? String, "turn_done")
+        XCTAssertNil(event["reply_channel"] as? String,
+                     "claude-code turn_done must not advertise hook-stdout as a reply channel anymore")
+        XCTAssertNil(event["request_id"] as? String,
+                     "claude-code turn_done is fire-and-forget — no request_id should be set")
     }
 
     /// Same reply/decision:block path as Claude; Cursor `stop` hook uses the first arg `cursor`.

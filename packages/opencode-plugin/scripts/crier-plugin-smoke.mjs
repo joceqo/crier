@@ -32,14 +32,28 @@ function mockClient(record) {
       }),
       promptAsync: async (opts) => {
         record.promptAsync.push(opts)
+        record.promptAsyncResolve?.()
         return { error: undefined, request: {}, response: new Response() }
       },
     },
     postSessionIdPermissionsPermissionId: async (opts) => {
       record.permission.push(opts)
+      record.permissionResolve?.()
       return { error: undefined, request: {}, response: new Response() }
     },
   }
+}
+
+/** Promise + resolver pair so the smoke test can wait on a specific mock call
+ *  to fire. The plugin now detaches its long-poll, so `await hooks.event(...)`
+ *  returns after the POST /event but before the reply is delivered — we need
+ *  an explicit signal. */
+function createSignal() {
+  let resolve
+  const promise = new Promise((r) => {
+    resolve = r
+  })
+  return { promise, resolve }
 }
 
 /** @typedef {{ promptAsync: unknown[], permission: unknown[] }} Record **/
@@ -144,13 +158,17 @@ const hooks = await Crier({
 })
 
 // session.idle → long-poll → promptAsync
-const p1 = hooks.event({
+// `hooks.event(...)` returns once the event has been POSTed; the long-poll
+// runs detached. The smoke test waits on the mocked `promptAsync` to fire
+// to know the detached task has injected the reply.
+const promptAsyncSignal = createSignal()
+record.promptAsyncResolve = promptAsyncSignal.resolve
+await hooks.event({
   event: { type: "session.idle", properties: { sessionID: "sess-turn-1" } },
 })
-await new Promise((r) => setTimeout(r, 20))
-assert.ok(state.lastRequestId)
+assert.ok(state.lastRequestId, "POST /event must have been made before hooks.event resolves")
 state.fulfill(state.lastRequestId, "  user reply line  ")
-await p1
+await promptAsyncSignal.promise
 
 assert.equal(state.lastEvent.session_id, "sess-turn-1")
 assert.equal(state.lastEvent.message, "Synthetic assistant text for smoke test")
@@ -161,12 +179,15 @@ assert.equal(record.promptAsync[0].body.parts[0].text, "user reply line")
 assert.equal(record.permission.length, 0)
 
 record.promptAsync.length = 0
+record.promptAsyncResolve = undefined
 state.lastRequestId = null
 
 // permission.asked → long-poll → postSessionIdPermissionsPermissionId
 // (OpenCode's actual emitted event name; older drafts of this smoke used
 // permission.updated, which the plugin and OpenCode never agreed on.)
-const p2 = hooks.event({
+const permissionSignal = createSignal()
+record.permissionResolve = permissionSignal.resolve
+await hooks.event({
   event: {
     type: "permission.asked",
     properties: {
@@ -180,9 +201,9 @@ const p2 = hooks.event({
     },
   },
 })
-await new Promise((r) => setTimeout(r, 20))
+assert.ok(state.lastRequestId)
 state.fulfill(state.lastRequestId, "reject")
-await p2
+await permissionSignal.promise
 
 assert.equal(record.permission.length, 1)
 assert.equal(record.permission[0].path.id, "sess-perm-1")

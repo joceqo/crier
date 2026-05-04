@@ -66,15 +66,96 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-echo "==> Ad-hoc signing"
-codesign --force --deep --sign - "$APP"
+# Signing mode:
+#   --release                 → Developer ID + hardened runtime + notarization,
+#                               outputs Crier.app.zip
+#   --release --dmg           → also produces a notarized, stapled
+#                               Crier.app.dmg with a drag-to-Applications
+#                               layout (the standard macOS install UX)
+#   default (no flag)         → ad-hoc signature, fast local iteration
+#
+# DEVELOPER_ID and NOTARY_PROFILE can be overridden via env if your cert
+# name or keychain profile name differs.
+RELEASE=0
+MAKE_DMG=0
+for arg in "$@"; do
+    case "$arg" in
+        --release) RELEASE=1 ;;
+        --dmg)     MAKE_DMG=1 ;;
+    esac
+done
+DEVELOPER_ID="${DEVELOPER_ID:-Developer ID Application: Queau Jocelin (VS3FLTY94C)}"
+NOTARY_PROFILE="${NOTARY_PROFILE:-crier-notary}"
 
-echo
-echo "Built: $APP"
-echo
-echo "Launch:    open '$APP'"
-echo "Reveal:    open -R '$APP'   (opens Finder selecting Crier.app, ready to drag)"
-echo
-echo "First launch shows an alert if Accessibility isn't granted."
-echo "Normally the entry auto-appears in Settings → Accessibility (just toggle it on)."
-echo "If it doesn't, drag Crier.app from this folder into the Accessibility list."
+if [ "$RELEASE" -eq 1 ]; then
+    echo "==> Signing with Developer ID ($DEVELOPER_ID)"
+    # --options runtime: required for notarization (hardened runtime).
+    # --timestamp: secure timestamp from Apple's TSA, also required.
+    codesign --force --deep --options runtime --timestamp \
+        --sign "$DEVELOPER_ID" "$APP"
+
+    ZIP="$REPO_DIR/Crier.app.zip"
+    rm -f "$ZIP"
+    # ditto preserves the bundle layout that notarytool expects (zip from
+    # Finder or `zip -r` produces a structure that often fails the upload).
+    echo "==> Zipping for notarization"
+    ditto -c -k --keepParent "$APP" "$ZIP"
+
+    echo "==> Submitting to Apple notarytool (this takes 1–5 min)"
+    xcrun notarytool submit "$ZIP" --keychain-profile "$NOTARY_PROFILE" --wait
+
+    echo "==> Stapling notarization ticket"
+    xcrun stapler staple "$APP"
+
+    # Re-zip the now-stapled bundle for distribution; the unstapled $ZIP we
+    # uploaded earlier is no longer the artifact we want users to download.
+    rm -f "$ZIP"
+    ditto -c -k --keepParent "$APP" "$ZIP"
+
+    if [ "$MAKE_DMG" -eq 1 ]; then
+        DMG="$REPO_DIR/Crier.app.dmg"
+        STAGE="$REPO_DIR/.build/dmg-staging"
+        echo "==> Building DMG (drag-to-Applications layout)"
+        rm -rf "$STAGE" "$DMG"
+        mkdir -p "$STAGE"
+        cp -R "$APP" "$STAGE/"
+        ln -s /Applications "$STAGE/Applications"
+        # UDZO = compressed read-only; the standard format for distribution.
+        hdiutil create -volname "Crier" -srcfolder "$STAGE" \
+            -ov -format UDZO "$DMG" >/dev/null
+        rm -rf "$STAGE"
+
+        # The DMG itself needs its own signature + notarization, separate
+        # from the app inside it. Otherwise the .dmg fails Gatekeeper even
+        # though the .app inside is fine.
+        echo "==> Signing DMG"
+        codesign --force --sign "$DEVELOPER_ID" --timestamp "$DMG"
+
+        echo "==> Submitting DMG to notarytool"
+        xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
+
+        echo "==> Stapling DMG"
+        xcrun stapler staple "$DMG"
+    fi
+
+    echo
+    echo "Release build complete:"
+    echo "  $APP"
+    echo "  $ZIP   ← upload this to GitHub Releases"
+    if [ "$MAKE_DMG" -eq 1 ]; then
+        echo "  $DMG   ← also upload"
+    fi
+else
+    echo "==> Ad-hoc signing (use --release for Developer ID + notarization)"
+    codesign --force --deep --sign - "$APP"
+
+    echo
+    echo "Built: $APP"
+    echo
+    echo "Launch:    open '$APP'"
+    echo "Reveal:    open -R '$APP'   (opens Finder selecting Crier.app, ready to drag)"
+    echo
+    echo "First launch shows an alert if Accessibility isn't granted."
+    echo "Normally the entry auto-appears in Settings → Accessibility (just toggle it on)."
+    echo "If it doesn't, drag Crier.app from this folder into the Accessibility list."
+fi

@@ -40,7 +40,7 @@ jq --arg emit "$EMIT" '
 
   .hooks //= {} |
   add(.hooks.Stop;
-      {"hooks":[{"type":"command","command":"\($emit) claude-code turn_done","timeout":600}]}) |
+      {"hooks":[{"type":"command","command":"\($emit) claude-code turn_done","timeout":30,"async":true}]}) |
   add(.hooks.Notification;
       {"hooks":[{"type":"command","command":"\($emit) claude-code needs_permission"}]}) |
   add(.hooks.PermissionRequest;

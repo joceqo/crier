@@ -168,12 +168,19 @@ default:
 let title = "\(prettyAgentName(agent)) · \(URL(fileURLWithPath: cwd).lastPathComponent)"
 
 // For Stop (turn_done), block this hook on the user's reply and emit
-// `{"decision":"block","reason":"<reply>"}` on stdout — Claude Code resumes
+// `{"decision":"block","reason":"<reply>"}` on stdout — the agent resumes
 // with that text as the next user prompt. Same mechanism Superwhisper's
 // claude-hook uses (verified: its binary contains the literal string
 // "Stop: relaying voice response via decision=block reason"). For other
 // events, fire-and-forget — don't block the hook chain.
-let blockingEvent = (event == "turn_done")
+//
+// Claude Code is the exception: as of Claude Code 2.1, the Stop hook is
+// installed with `async: true`, so blocking it doesn't change anything for
+// the agent (the hook's stdout is ignored when async). Crier delivers the
+// reply for Claude Code via keystroke posting to the agent's terminal —
+// see CrierUI's `submit()` keystroke path. So we fire-and-forget here too,
+// which has the side benefit of unblocking the user's terminal immediately.
+let blockingEvent = (event == "turn_done" && agent != "claude-code")
 let requestId = UUID().uuidString
 
 var payload: [String: Any] = [
@@ -224,11 +231,20 @@ func isCwdDisabled(_ cwd: String) -> Bool {
 /// fallback should activate. Returns `nil` if the daemon is unreachable
 /// (caller should treat that as "no UI" so the TTY fallback engages and
 /// the hook can still be answered).
+// Tiny mutable box so URLSession's @Sendable completion handler can write a
+// result that a synchronous caller (parked on a semaphore) reads back. The
+// semaphore wait establishes happens-before with the closure, so no lock is
+// needed — `@unchecked Sendable` documents the manual reasoning.
+private final class MutableBox<T>: @unchecked Sendable {
+    var value: T
+    init(_ v: T) { self.value = v }
+}
+
 func uiSubscriberCount(timeout: TimeInterval = 1.0) -> Int? {
     guard let url = URL(string: "\(crierBase)/status") else { return nil }
     var req = URLRequest(url: url)
     req.timeoutInterval = timeout
-    var count: Int?
+    let count = MutableBox<Int?>(nil)
     let sem = DispatchSemaphore(value: 0)
     URLSession.shared.dataTask(with: req) { data, response, _ in
         defer { sem.signal() }
@@ -236,28 +252,28 @@ func uiSubscriberCount(timeout: TimeInterval = 1.0) -> Int? {
               let data = data,
               let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let n = obj["ui_subscribers"] as? Int else { return }
-        count = n
+        count.value = n
     }.resume()
     _ = sem.wait(timeout: .now() + timeout + 0.5)
-    return count
+    return count.value
 }
 
 func longPollReply(requestId: String, waitSeconds: Int) -> String? {
     guard let url = URL(string: "\(crierBase)/reply?request_id=\(requestId)&wait=\(waitSeconds)") else { return nil }
     var req = URLRequest(url: url)
     req.timeoutInterval = TimeInterval(waitSeconds + 5)
-    var result: String?
+    let result = MutableBox<String?>(nil)
     let sem = DispatchSemaphore(value: 0)
     URLSession.shared.dataTask(with: req) { data, response, _ in
         if let http = response as? HTTPURLResponse, http.statusCode == 200,
            let data = data, !data.isEmpty,
            let s = String(data: data, encoding: .utf8) {
-            result = s
+            result.value = s
         }
         sem.signal()
     }.resume()
     _ = sem.wait(timeout: .now() + .seconds(waitSeconds + 10))
-    return result
+    return result.value
 }
 
 log("start: agent=\(agent) event=\(event) blocking=\(blockingEvent) request_id=\(requestId)")

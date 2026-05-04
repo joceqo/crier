@@ -142,64 +142,72 @@ final class CrierE2ETests: XCTestCase {
         XCTAssertTrue(message.contains(marker), "expected '\(marker)' in message but got: \(message.prefix(200))")
     }
 
-    // Verifies the reply loop: Claude asks → Crier delivers reply → Claude sees it.
-    // This is the most important user flow to test.
-    func testClaudeCodeReplyReachesClaudeViaHookStdout() throws {
+    // With Claude Code 2.1's `async: true` Stop hook, the hook is
+    // fire-and-forget: crier-emit posts the event and exits immediately,
+    // and stdout from the hook is ignored. So the old "reply via
+    // decision:block on stdout" loop no longer exists for Claude Code —
+    // replies are delivered out-of-band via keystroke posting from the
+    // Crier UI, which can't be exercised in an automated test without an
+    // interactive TTY and accessibility permission.
+    //
+    // What we *can* still assert is the regression we care about: the
+    // Stop hook must not freeze the user's terminal. We measure how long
+    // `claude -p` takes to exit and require it to be much less than the
+    // 540s ceiling the old blocking long-poll could hit.
+    func testClaudeCodeStopHookDoesNotBlockTerminal() throws {
         try requireE2E()
         let claudePath = try requireBinary("claude")
 
         var received: [String: Any]?
         let eventSem = DispatchSemaphore(value: 0)
         DispatchQueue.global().async {
-            received = self.nextEvent(waitSeconds: 60)
+            received = self.nextEventMatching(
+                { ($0["event"] as? String) == "turn_done" && ($0["agent"] as? String) == "claude-code" },
+                totalBudget: 75
+            )
             eventSem.signal()
         }
         Thread.sleep(forTimeInterval: 0.1)
 
-        // Claude finishes a turn, hook fires, we inject a reply, Claude should continue.
-        let claudeOutput = Pipe()
         let p = Process()
         p.executableURL = URL(fileURLWithPath: claudePath)
-        p.arguments = [
-            "-p",
-            // Ask Claude to wait for our reply by ending with a question.
-            // The Stop hook fires and blocks; we deliver the reply below.
-            "Say only 'WAITING' then stop. The user will reply with a number and you should output ECHO: followed by that number.",
-        ]
+        // Short prompt — we want claude to finish and fire Stop quickly.
+        p.arguments = ["-p", "Say only the word DONE."]
         var env = ProcessInfo.processInfo.environment
         env["CRIER_PORT"] = "\(Self.port)"
         p.environment = env
-        p.standardOutput = claudeOutput
+        p.standardOutput = Pipe()
         p.standardError = Pipe()
+
+        let start = Date()
         try p.run()
-
-        // Wait for the event to land at our server.
-        _ = eventSem.wait(timeout: .now() + 75)
-        guard let event = received,
-              let requestId = event["request_id"] as? String else {
+        // Generous ceiling that's still way below 540s; if the hook is
+        // accidentally blocking again, this trips well before the 75s budget.
+        let exited = waitForProcess(p, timeoutSeconds: 75)
+        let elapsed = Date().timeIntervalSince(start)
+        if !exited {
             p.terminate()
-            throw XCTSkip("no event or request_id received — skipping reply test")
+            XCTFail("claude -p did not exit within 75s — Stop hook is likely blocking again (elapsed \(elapsed)s)")
+            return
         }
+        XCTAssertLessThan(elapsed, 75,
+                          "claude -p took \(elapsed)s — Stop hook may be blocking the terminal")
 
-        // Deliver the reply via the test server.
-        let replyURL = URL(string: "\(Self.base)/reply")!
-        var req = URLRequest(url: replyURL)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "content-type")
-        req.httpBody = try JSONSerialization.data(withJSONObject: [
-            "request_id": requestId,
-            "text": "42",
-            "channel": "hook-stdout",
-        ])
-        req.timeoutInterval = 5
-        let sem = DispatchSemaphore(value: 0)
-        URLSession.shared.dataTask(with: req) { _, _, _ in sem.signal() }.resume()
-        _ = sem.wait(timeout: .now() + 8)
+        _ = eventSem.wait(timeout: .now() + 5)
+        let event = try XCTUnwrap(received, "Stop hook did not POST a turn_done event")
+        XCTAssertNil(event["request_id"] as? String,
+                     "claude-code turn_done is fire-and-forget — no request_id should be advertised")
+        XCTAssertNil(event["reply_channel"] as? String,
+                     "claude-code turn_done must not advertise hook-stdout anymore")
+    }
 
-        p.waitUntilExit()
-        let output = String(data: claudeOutput.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        XCTAssertTrue(output.contains("42") || output.contains("ECHO"),
-                      "Claude's final output should contain the number we sent via reply, got: \(output.prefix(200))")
+    private func waitForProcess(_ p: Process, timeoutSeconds: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while p.isRunning {
+            if Date() >= deadline { return false }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        return true
     }
 
     // MARK: - Markdown rendering E2E

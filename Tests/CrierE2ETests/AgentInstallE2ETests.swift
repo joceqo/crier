@@ -246,7 +246,7 @@ final class AgentInstallE2ETests: XCTestCase {
             "plugin instantiated",
             "event received",
             "POST /event response",
-            "long-poll /reply start",
+            "long-poll /reply detached",
             "/reply response",
             "reply received",
             "session.promptAsync delivered reply",
