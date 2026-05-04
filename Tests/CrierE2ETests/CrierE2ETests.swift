@@ -132,29 +132,31 @@ final class CrierE2ETests: XCTestCase {
         p.standardOutput = Pipe()
         p.standardError = Pipe()
         try p.run()
-        p.waitUntilExit()
 
+        // Stop hook is now blocking — wait for the event, release the hook,
+        // then wait for claude to exit. Without the release, p.waitUntilExit
+        // would hang for 540s waiting on the hook's long-poll.
         _ = eventSem.wait(timeout: .now() + 80)
         let event = try XCTUnwrap(received, "no turn_done event received within timeout — hook may not be configured or crier-emit may not be installed")
+        if let rid = event["request_id"] as? String { releaseStopHook(requestId: rid) }
+
+        p.waitUntilExit()
+
         XCTAssertEqual(event["agent"] as? String, "claude-code")
         XCTAssertEqual(event["event"] as? String, "turn_done")
         let message = event["message"] as? String ?? ""
         XCTAssertTrue(message.contains(marker), "expected '\(marker)' in message but got: \(message.prefix(200))")
     }
 
-    // With Claude Code 2.1's `async: true` Stop hook, the hook is
-    // fire-and-forget: crier-emit posts the event and exits immediately,
-    // and stdout from the hook is ignored. So the old "reply via
-    // decision:block on stdout" loop no longer exists for Claude Code —
-    // replies are delivered out-of-band via keystroke posting from the
-    // Crier UI, which can't be exercised in an automated test without an
-    // interactive TTY and accessibility permission.
-    //
-    // What we *can* still assert is the regression we care about: the
-    // Stop hook must not freeze the user's terminal. We measure how long
-    // `claude -p` takes to exit and require it to be much less than the
-    // 540s ceiling the old blocking long-poll could hit.
-    func testClaudeCodeStopHookDoesNotBlockTerminal() throws {
+    // Claude Code's Stop hook is now blocking + hook-stdout, matching
+    // Cursor/Codex/OpenCode and Superwhisper's claude-hook. This test
+    // verifies the new contract end-to-end with a real `claude` binary:
+    //   1. `claude -p` finishes its turn and fires the Stop hook
+    //   2. crier-emit posts the event with request_id + reply_channel
+    //   3. test sends an empty /reply (the UI's Dismiss path) to release
+    //      the hook so claude exits cleanly without consuming a decision
+    //      reason as the next prompt
+    func testClaudeCodeStopHookAdvertisesHookStdoutReply() throws {
         try requireE2E()
         let claudePath = try requireBinary("claude")
 
@@ -171,7 +173,6 @@ final class CrierE2ETests: XCTestCase {
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: claudePath)
-        // Short prompt — we want claude to finish and fire Stop quickly.
         p.arguments = ["-p", "Say only the word DONE."]
         var env = ProcessInfo.processInfo.environment
         env["CRIER_PORT"] = "\(Self.port)"
@@ -181,24 +182,38 @@ final class CrierE2ETests: XCTestCase {
 
         let start = Date()
         try p.run()
-        // Generous ceiling that's still way below 540s; if the hook is
-        // accidentally blocking again, this trips well before the 75s budget.
-        let exited = waitForProcess(p, timeoutSeconds: 75)
+
+        // Wait for the event, then release the hook so claude can finish.
+        _ = eventSem.wait(timeout: .now() + 75)
+        let event = try XCTUnwrap(received, "Stop hook did not POST a turn_done event within 75s")
+        let rid = try XCTUnwrap(event["request_id"] as? String,
+            "claude-code turn_done must advertise a request_id (hook is now blocking)")
+        XCTAssertEqual(event["reply_channel"] as? String, "hook-stdout",
+                       "claude-code turn_done must advertise hook-stdout as the reply channel")
+
+        releaseStopHook(requestId: rid)
+
+        let exited = waitForProcess(p, timeoutSeconds: 30)
         let elapsed = Date().timeIntervalSince(start)
         if !exited {
             p.terminate()
-            XCTFail("claude -p did not exit within 75s — Stop hook is likely blocking again (elapsed \(elapsed)s)")
-            return
+            XCTFail("claude -p did not exit within 30s after release (elapsed \(elapsed)s)")
         }
-        XCTAssertLessThan(elapsed, 75,
-                          "claude -p took \(elapsed)s — Stop hook may be blocking the terminal")
+    }
 
-        _ = eventSem.wait(timeout: .now() + 5)
-        let event = try XCTUnwrap(received, "Stop hook did not POST a turn_done event")
-        XCTAssertNil(event["request_id"] as? String,
-                     "claude-code turn_done is fire-and-forget — no request_id should be advertised")
-        XCTAssertNil(event["reply_channel"] as? String,
-                     "claude-code turn_done must not advertise hook-stdout anymore")
+    /// POST /reply with empty text — same payload the Crier UI sends when
+    /// the user hits Dismiss. crier-emit treats it as "user wants to type
+    /// in the terminal" and exits without printing decision:block.
+    private func releaseStopHook(requestId: String) {
+        guard let url = URL(string: "http://127.0.0.1:\(Self.port)/reply") else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "content-type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["request_id": requestId, "text": ""])
+        req.timeoutInterval = 5
+        let sem = DispatchSemaphore(value: 0)
+        URLSession.shared.dataTask(with: req) { _, _, _ in sem.signal() }.resume()
+        _ = sem.wait(timeout: .now() + 6)
     }
 
     private func waitForProcess(_ p: Process, timeoutSeconds: TimeInterval) -> Bool {

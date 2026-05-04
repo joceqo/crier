@@ -61,10 +61,10 @@ struct MessageWithOptionalSummary: View {
                     .overlay(alignment: .topLeading) {
                         Text("Summary")
                             .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.primary)
                             .padding(.horizontal, 7)
                             .padding(.vertical, 3)
-                            .background(.quaternary, in: Capsule())
+                            .background(.tertiary, in: Capsule())
                             .padding(8)
                     }
             }
@@ -97,9 +97,10 @@ struct MessageWithOptionalSummary: View {
                         Text("Summarize")
                             .font(.system(size: 11, weight: .medium))
                     }
+                    .foregroundStyle(.primary)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
-                    .background(.quaternary, in: Capsule())
+                    .background(.tertiary, in: Capsule())
                 }
                 .buttonStyle(.plain)
             } else {
@@ -112,9 +113,10 @@ struct MessageWithOptionalSummary: View {
                         Text("Hide summary")
                             .font(.system(size: 11, weight: .medium))
                     }
+                    .foregroundStyle(.primary)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
-                    .background(.quaternary, in: Capsule())
+                    .background(.tertiary, in: Capsule())
                 }
                 .buttonStyle(.plain)
             }

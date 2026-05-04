@@ -9,6 +9,7 @@ let package = Package(
         .executable(name: "crier-ui", targets: ["CrierUI"]),
         .executable(name: "crier-emit", targets: ["CrierEmit"]),
         .executable(name: "crier-wrap", targets: ["CrierWrap"]),
+        .executable(name: "crier-keystroke-receiver", targets: ["CrierKeystrokeReceiver"]),
         .library(name: "CrierServer", targets: ["CrierServer"]),
         .library(name: "CrierEmitCore", targets: ["CrierEmitCore"]),
     ],
@@ -55,6 +56,10 @@ let package = Package(
             path: "Sources/CrierEmit"
         ),
         .executableTarget(name: "CrierWrap", path: "Sources/CrierWrap"),
+        .executableTarget(
+            name: "CrierKeystrokeReceiver",
+            path: "Sources/CrierKeystrokeReceiver"
+        ),
         .testTarget(
             name: "CrierEmitCoreTests",
             dependencies: ["CrierEmitCore"],
@@ -74,6 +79,10 @@ let package = Package(
             name: "CrierE2ETests",
             dependencies: ["CrierServer"],
             path: "Tests/CrierE2ETests"
+        ),
+        .testTarget(
+            name: "CrierKeystrokeE2ETests",
+            path: "Tests/CrierKeystrokeE2ETests"
         ),
     ]
 )

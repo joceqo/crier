@@ -195,4 +195,69 @@ final class CrierServerTests: XCTestCase {
         }
         XCTAssertEqual(resp.statusCode, 204)
     }
+
+    /// End-to-end: POST /reply with channel=tmux must run `tmux send-keys` and
+    /// land the text inside the target pane. Spawns a real detached tmux
+    /// session running `cat` so keystrokes echo back into the pane buffer,
+    /// which we then read with `tmux capture-pane`.
+    func testTmuxReplyDeliversTextToPane() throws {
+        guard let tmux = which("tmux") else {
+            throw XCTSkip("tmux not installed — skipping tmux delivery test")
+        }
+
+        let session = "crier-test-\(UUID().uuidString.prefix(8))"
+        defer { _ = run(tmux, ["kill-session", "-t", session]) }
+
+        // Detached session running `cat`: stdin echoes to stdout, so anything
+        // send-keys posts shows up in the pane buffer.
+        let (newRC, _, newErr) = run(tmux, ["new-session", "-d", "-s", session, "cat"])
+        guard newRC == 0 else {
+            return XCTFail("tmux new-session failed: \(newErr)")
+        }
+        // Let `cat` settle so it's actually reading stdin before we send keys.
+        Thread.sleep(forTimeInterval: 0.2)
+
+        let payload = "hello-from-tmux-test-\(UUID().uuidString.prefix(6))"
+        guard let (_, resp) = post("/reply", body: [
+            "channel": "tmux",
+            "target": session,
+            "text": payload,
+        ]) else { return XCTFail("no response from /reply") }
+        XCTAssertEqual(resp.statusCode, 200)
+
+        // handlePostReply dispatches send-keys on a background queue, so give
+        // it a moment to run both the literal-text and the Enter call.
+        var captured = ""
+        let deadline = Date().addingTimeInterval(2.0)
+        while Date() < deadline {
+            let (_, out, _) = run(tmux, ["capture-pane", "-p", "-t", session])
+            if out.contains(payload) { captured = out; break }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        XCTAssertTrue(
+            captured.contains(payload),
+            "tmux pane never received the reply text. capture-pane output:\n\(captured)"
+        )
+    }
+
+    // MARK: - shell helpers (tmux test)
+
+    private func which(_ tool: String) -> String? {
+        let candidates = ["/opt/homebrew/bin/\(tool)", "/usr/local/bin/\(tool)", "/usr/bin/\(tool)"]
+        for c in candidates where FileManager.default.isExecutableFile(atPath: c) { return c }
+        return nil
+    }
+
+    private func run(_ exe: String, _ args: [String]) -> (Int32, String, String) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: exe)
+        p.arguments = args
+        let outPipe = Pipe(); let errPipe = Pipe()
+        p.standardOutput = outPipe; p.standardError = errPipe
+        do { try p.run() } catch { return (-1, "", "\(error)") }
+        p.waitUntilExit()
+        let out = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        return (p.terminationStatus, out, err)
+    }
 }

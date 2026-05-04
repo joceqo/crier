@@ -3,9 +3,12 @@
 .swiftpm/
 DerivedData/
 Crier.app/
+Crier.app.zip
+Crier.app.dmg
 *.xcodeproj/xcuserdata/
 *.xcworkspace/xcuserdata/
 Package.resolved
+.claude/
 
 node_modules/
 dist/

@@ -933,20 +933,23 @@ struct CrierPanelView: View {
 
         return VStack(alignment: .leading, spacing: 0) {
             if let k = key {
-                TextField(
-                    "Type or dictate what you want changed.",
-                    text: Binding(
-                        get: { state.sessions.first { $0.id == k }?.replyDraft ?? "" },
-                        set: { state.updateReplyDraft(sessionId: k, text: $0) }
-                    ),
-                    axis: .vertical
-                )
-                .textFieldStyle(.plain)
-                .font(.system(size: 14))
-                .lineLimit(2...8)
-                .padding(16)
-                .focused($fieldFocused)
-                .onSubmit { onSubmit() }
+                ScrollView(.vertical) {
+                    TextField(
+                        "Type or dictate what you want changed.",
+                        text: Binding(
+                            get: { state.sessions.first { $0.id == k }?.replyDraft ?? "" },
+                            set: { state.updateReplyDraft(sessionId: k, text: $0) }
+                        ),
+                        axis: .vertical
+                    )
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 14))
+                    .lineLimit(2...)
+                    .padding(16)
+                    .focused($fieldFocused)
+                    .onSubmit { onSubmit() }
+                }
+                .frame(maxHeight: 180)
             } else {
                 Text("No session")
                     .foregroundStyle(.secondary)
@@ -1477,7 +1480,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "content-type")
             req.httpBody = data
-            URLSession.shared.dataTask(with: req).resume()
+            // Without a completion handler, network failures are invisible —
+            // the user just sees the panel hide as if the reply landed. Log
+            // the outcome so we can diagnose "submitted but nothing happened".
+            let session = s.id
+            let chForLog = s.replyChannel ?? "keystroke"
+            URLSession.shared.dataTask(with: req) { _, resp, err in
+                if let err {
+                    uiLog("reply POST failed · session=\(session) · ch=\(chForLog) · err=\(err.localizedDescription)")
+                } else if let http = resp as? HTTPURLResponse, http.statusCode != 200 {
+                    uiLog("reply POST non-200 · session=\(session) · ch=\(chForLog) · status=\(http.statusCode)")
+                }
+            }.resume()
+        } else {
+            uiLog("reply POST skipped: invalid url or unencodable body · session=\(s.id)")
         }
 
         let channel = s.replyChannel

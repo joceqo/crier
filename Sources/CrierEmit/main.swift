@@ -170,17 +170,19 @@ let title = "\(prettyAgentName(agent)) · \(URL(fileURLWithPath: cwd).lastPathCo
 // For Stop (turn_done), block this hook on the user's reply and emit
 // `{"decision":"block","reason":"<reply>"}` on stdout — the agent resumes
 // with that text as the next user prompt. Same mechanism Superwhisper's
-// claude-hook uses (verified: its binary contains the literal string
-// "Stop: relaying voice response via decision=block reason"). For other
-// events, fire-and-forget — don't block the hook chain.
+// claude-hook uses (verified: its binary contains only `decision`, `block`,
+// `reason` symbols and no CGEvent/AX symbols at all). For other events,
+// fire-and-forget — don't block the hook chain.
 //
-// Claude Code is the exception: as of Claude Code 2.1, the Stop hook is
-// installed with `async: true`, so blocking it doesn't change anything for
-// the agent (the hook's stdout is ignored when async). Crier delivers the
-// reply for Claude Code via keystroke posting to the agent's terminal —
-// see CrierUI's `submit()` keystroke path. So we fire-and-forget here too,
-// which has the side benefit of unblocking the user's terminal immediately.
-let blockingEvent = (event == "turn_done" && agent != "claude-code")
+// Earlier versions excluded claude-code here on the assumption that
+// Claude Code 2.1's Stop hook ran with `async: true` (stdout ignored).
+// That turned out to be wrong: SW's plugin installs an unasync Stop hook
+// and decision:block round-trips fine. Crier now uses the same path so
+// replies don't depend on CGEventPost / Accessibility / focus races.
+// To answer in the terminal instead, the user dismisses the panel — the
+// UI POSTs an empty /reply, this hook returns without decision JSON, and
+// Claude Code falls through to its normal prompt.
+let blockingEvent = (event == "turn_done")
 let requestId = UUID().uuidString
 
 var payload: [String: Any] = [
