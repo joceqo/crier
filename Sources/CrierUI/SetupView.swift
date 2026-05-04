@@ -105,11 +105,11 @@ struct SetupView: View {
             Divider()
 
             HStack {
-                Button("OpenCode (separate)") {
-                    NSWorkspace.shared.open(URL(string: "https://github.com/joceqo/crier#opencode")!)
+                Button("Install OpenCode plugin →") {
+                    NSWorkspace.shared.open(URL(string: "https://github.com/joceqo/crier#install-opencode-plugin")!)
                 }
                 .buttonStyle(.link)
-                .help("OpenCode integration is an npm package — install separately. Click for instructions.")
+                .help("OpenCode integration is a separate npm-style plugin. Opens install instructions with a one-liner curl command.")
                 Spacer()
                 Button("Close") { onClose() }
                     .keyboardShortcut(.cancelAction)

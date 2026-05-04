@@ -1,8 +1,45 @@
-# Crier
+<p align="center">
+  <img src="assets/icon.png" width="160" alt="Crier app icon" />
+</p>
 
-A native macOS popover that surfaces *any* CLI agent's last message wherever you are on screen, lets you reply by text or dictation (using whichever STT engine you want), and can be answered hands-free via an AirPods stem-tap when you're away from the keyboard.
+<h1 align="center">Crier</h1>
+
+<p align="center">
+A native macOS popover that surfaces <em>any</em> CLI agent's last message wherever you are on screen, lets you reply by text or dictation (using whichever STT engine you want), and can be answered hands-free via an AirPods stem-tap when you're away from the keyboard.
+</p>
 
 **Status:** Working Claude Code vertical slice. The daemon, hook emitter, SwiftUI panel, reply long-poll, and tmux delivery paths are implemented; Claude Code has been manually tested. Codex, Cursor, OpenCode, and PTY-wrapped agents still need provider-specific validation before they should be treated as supported.
+
+## Install
+
+### Crier app
+
+Grab the latest signed + notarized DMG from [Releases](https://github.com/joceqo/crier/releases/latest), drag **Crier.app** into Applications, and launch it. The Setup window will offer one-click hook installation for Claude Code / Cursor / Codex.
+
+If the browser download stalls partway, grab it via the gh CLI (works around GitHub's signed-URL JWT expiry on cold cache):
+
+```bash
+gh release download --repo joceqo/crier --pattern "Crier.app.dmg" -D ~/Downloads
+```
+
+<a id="opencode"></a>
+<a id="install-opencode-plugin"></a>
+
+### OpenCode plugin
+
+OpenCode integration is shipped as a separate npm-style plugin (it can't be installed via Crier's Setup window because OpenCode plugins are TS modules wired into `opencode.json`, not shell hooks). One-liner:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/joceqo/crier/main/scripts/install-opencode.sh | bash
+```
+
+What it does:
+1. Sparse-clones `packages/opencode-plugin` from this repo into `~/.local/share/crier/opencode-plugin`
+2. Builds it (`npm install && npm run build`)
+3. `npm link`s it globally
+4. Registers it via `opencode plugin -g -f @crier/opencode-plugin`, with a `~/.config/opencode/opencode.json` fallback if the CLI doesn't resolve linked packages
+
+Re-runnable — running it again pulls the latest plugin source and rebuilds.
 
 ## Repo layout
 
