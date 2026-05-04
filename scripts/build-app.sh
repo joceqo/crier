@@ -104,8 +104,15 @@ NOTARY_PROFILE="${NOTARY_PROFILE:-crier-notary}"
 
 if [ "$RELEASE" -eq 1 ]; then
     echo "==> Signing with Developer ID ($DEVELOPER_ID)"
-    # --options runtime: required for notarization (hardened runtime).
-    # --timestamp: secure timestamp from Apple's TSA, also required.
+    # Sign nested executables FIRST so they get the hardened runtime + secure
+    # timestamp individually. `--deep` on the outer bundle alone doesn't apply
+    # those flags to inner binaries; notarization rejects the result with
+    # "binary is not signed with a valid Developer ID" / "no secure timestamp"
+    # / "hardened runtime not enabled" for the nested executable.
+    codesign --force --options runtime --timestamp \
+        --sign "$DEVELOPER_ID" "$APP/Contents/Resources/bin/crier-emit"
+    # Now seal the outer bundle. --deep is harmless here (the inner binary's
+    # signature is already correct and won't be re-stamped).
     codesign --force --deep --options runtime --timestamp \
         --sign "$DEVELOPER_ID" "$APP"
 
