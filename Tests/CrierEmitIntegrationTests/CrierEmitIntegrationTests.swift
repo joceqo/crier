@@ -1,6 +1,7 @@
 import XCTest
 import Foundation
 @testable import CrierServer
+@testable import CrierEmitCore
 
 // Integration tests for crier-emit as a subprocess.
 // These tests spawn the actual crier-emit binary with synthetic inputs (no
@@ -392,6 +393,92 @@ final class CrierEmitIntegrationTests: XCTestCase {
         XCTAssertEqual(parsed?["decision"] as? String, "block", "[\(agent)] expected decision:block")
         let reason = parsed?["reason"] as? String ?? ""
         XCTAssertTrue(reason.contains(replyText), "[\(agent)] reason should contain the reply text, got: \(reason)")
+    }
+
+    /// **The "Send from UI doesn't work" regression guard.**
+    ///
+    /// Drives the full daemon round-trip using the EXACT bytes
+    /// `CrierEmitCore.buildReplyPost(...)` produces — i.e. the same body
+    /// CrierUI's submit() sends when the user clicks Send. If anything
+    /// drifts (UI body shape, daemon endpoint expectations, channel
+    /// routing) this test fails before a user notices a silently-broken
+    /// Send.
+    func testUISubmitBytesRoundTripThroughCrierEmitToDecisionBlock() throws {
+        guard !Self.emitBinaryPath.isEmpty else { throw XCTSkip("crier-emit binary not built") }
+
+        let transcript = try makeTranscript(message: "claude-code: UI Send round-trip")
+        let stdinPayload: [String: Any] = [
+            "transcript_path": transcript.path,
+            "session_id": "ui-send-\(UUID().uuidString)",
+            "cwd": "/tmp",
+        ]
+
+        // 1. Park a /current waiter, spawn crier-emit, read the event.
+        var received: [String: Any]?
+        let eventSem = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            received = self.nextEvent(waitSeconds: 10)
+            eventSem.signal()
+        }
+        Thread.sleep(forTimeInterval: 0.05)
+
+        var emitOutput = ""
+        let emitSem = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            let (_, stdout, _) = self.runEmit(agent: "claude-code", event: "turn_done", stdinPayload: stdinPayload)
+            emitOutput = stdout
+            emitSem.signal()
+        }
+
+        _ = eventSem.wait(timeout: .now() + 15)
+        let event = try XCTUnwrap(received, "no event received from crier-emit")
+        let receivedSessionId = try XCTUnwrap(event["session_id"] as? String,
+            "claude-code event must carry session_id")
+        XCTAssertEqual(event["reply_channel"] as? String, "hook-stdout-queue",
+            "claude-code turn_done must advertise hook-stdout-queue")
+
+        // 2. Build the POST plan via CrierEmitCore.buildReplyPost — same
+        //    function CrierUI's submit() invokes — pointing at this
+        //    test's daemon on Self.base.
+        let replyText = "Send from UI · \(UUID().uuidString.prefix(6))"
+        let plan = try XCTUnwrap(CrierEmitCore.buildReplyPost(
+            endpoint: Self.base,
+            sessionId: receivedSessionId,
+            text: String(replyText),
+            replyChannel: event["reply_channel"] as? String,
+            requestId: event["request_id"] as? String,
+            replyTarget: event["reply_target"] as? String
+        ), "buildReplyPost returned nil — UI Send would silently no-op")
+        XCTAssertEqual(plan.url.path, "/reply/queue",
+            "UI Send must hit /reply/queue for hook-stdout-queue sessions")
+
+        // 3. Send the plan's exact bytes — this is what URLSession.dataTask
+        //    in submit() does at runtime.
+        var req = URLRequest(url: plan.url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "content-type")
+        req.httpBody = plan.body
+        req.timeoutInterval = 5
+        let postSem = DispatchSemaphore(value: 0)
+        var postStatus: Int = 0
+        URLSession.shared.dataTask(with: req) { _, resp, _ in
+            postStatus = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            postSem.signal()
+        }.resume()
+        _ = postSem.wait(timeout: .now() + 6)
+        XCTAssertEqual(postStatus, 200, "POST /reply/queue should return 200")
+
+        // 4. crier-emit's drain wakes; decision:block fires. Assert the
+        //    user's reply text round-trips into the reason.
+        _ = emitSem.wait(timeout: .now() + 10)
+        let parsed = try XCTUnwrap(
+            (try? JSONSerialization.jsonObject(with: Data(emitOutput.utf8))) as? [String: Any],
+            "crier-emit stdout did not contain decision JSON. Raw stdout: \(emitOutput.prefix(500))"
+        )
+        XCTAssertEqual(parsed["decision"] as? String, "block")
+        let reason = parsed["reason"] as? String ?? ""
+        XCTAssertTrue(reason.contains(String(replyText)),
+            "decision:block reason should contain UI reply text, got: \(reason)")
     }
 
     /// Pre-queue round-trip for claude-code:

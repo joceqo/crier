@@ -190,3 +190,66 @@ public enum CrierEmitCore {
         return out.sorted { $0.0 < $1.0 }
     }
 }
+
+// MARK: - UI Send routing
+//
+// Decoupled from CrierUI so the routing logic is reachable from tests
+// (CrierUI is an executable target whose top-level NSApplication launch
+// would break a test bundle). The UI's panel.submit() is a thin wrapper
+// around `buildReplyPost(...)` + URLSession.dataTask.
+
+extension CrierEmitCore {
+    /// Output of Send routing — the URL to POST to and the JSON body.
+    /// Pure data; no network. Equatable so tests can assert on shape.
+    public struct ReplyPostPlan: Equatable {
+        public let url: URL
+        public let body: Data
+
+        public init(url: URL, body: Data) {
+            self.url = url
+            self.body = body
+        }
+    }
+
+    /// Decide which endpoint Send should hit and assemble the JSON body.
+    /// Mirrors what CrierUI's submit() does at runtime.
+    ///
+    /// Routing:
+    ///   • replyChannel == "hook-stdout-queue" (claude-code, pre-queue
+    ///     architecture) → POST /reply/queue with {"session_id":...,
+    ///     "text":...}. Wakes whichever GET /reply/drain is parked or
+    ///     stores the reply for the next drain.
+    ///   • anything else → legacy POST /reply keyed on request_id, with
+    ///     channel + target carried so tmux / http-poll routing works.
+    ///
+    /// Returns `nil` if the URL or JSON can't be constructed (the caller
+    /// treats that as "skip POST" — happens only on truly invalid input).
+    public static func buildReplyPost(
+        endpoint: String,
+        sessionId: String,
+        text: String,
+        replyChannel: String?,
+        requestId: String?,
+        replyTarget: String?
+    ) -> ReplyPostPlan? {
+        let useQueueEndpoint = (replyChannel == "hook-stdout-queue")
+        let postPath = useQueueEndpoint ? "/reply/queue" : "/reply"
+
+        var body: [String: Any] = ["text": text]
+        body["session_id"] = sessionId
+        if !useQueueEndpoint {
+            if let r = requestId { body["request_id"] = r }
+            if let c = replyChannel { body["channel"] = c }
+            if let t = replyTarget { body["target"] = t }
+        }
+
+        guard let url = URL(string: "\(endpoint)\(postPath)"),
+              let data = try? JSONSerialization.data(
+                withJSONObject: body,
+                options: [.sortedKeys]   // deterministic byte order for tests
+              ) else {
+            return nil
+        }
+        return ReplyPostPlan(url: url, body: data)
+    }
+}

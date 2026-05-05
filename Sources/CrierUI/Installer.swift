@@ -128,28 +128,23 @@ enum Installer {
         // Stop / Notification / PermissionRequest / PreToolUse / UserPromptSubmit.
         // Schema mirrors install-local-claude-code.sh — kept in sync deliberately.
         //
-        // Sync hook (no `async: true`) with `timeout: 540` (9 min):
-        //   • Sync avoids the "Stop hook error" UI label async hooks light
-        //     up on every reply (anthropics/claude-code#10463 / #34600 /
-        //     #39953).
-        //   • timeout: 540 is the explicit ceiling — without it,
-        //     claude-code's default sync hook timeout (60 s) SIGTERMs the
-        //     hook before crier-emit's 5-min /reply/drain finishes.
-        //   • While the hook is parked, claude-code's TUI accepts
-        //     keystrokes into its prompt buffer; if the user hits Enter,
-        //     UserPromptSubmit fires (mapped to `crier-emit claude-code
-        //     dismiss` below), which posts event="dismiss" and the daemon
-        //     clears the drain immediately. So the user can answer in
-        //     the Crier overlay OR in the terminal — whichever they
-        //     prefer wins, no race.
-        //   • Matches Superwhisper's claude-hook shape (sync, ~5-min
-        //     poll, UserPromptSubmit-cancels-poll) verified in
-        //     superwhisper-claude-code-plugin-analysis.md.
+        // Sync hook with NO `timeout` field — exactly what Superwhisper's
+        // hooks.json does. Empirically validated against SW.app's binary:
+        // Stop hook stayed alive past 6 minutes while polling its inbox
+        // file. Setting `timeout` was a defensive guess that didn't match
+        // SW and added an artificial 9-min ceiling we don't actually need.
+        //
+        // While the hook is parked, claude-code's TUI accepts keystrokes
+        // into its prompt buffer; if the user hits Enter, UserPromptSubmit
+        // fires (mapped to `crier-emit claude-code dismiss` below) which
+        // posts event="dismiss" and the daemon clears the drain
+        // immediately. So the user can answer in the Crier overlay OR in
+        // the terminal — whichever they prefer wins, no race, no async,
+        // no "Stop hook error" UI label.
         hooks["Stop"] = stripCrierAndAppend(
             hooks["Stop"] as? [[String: Any]],
             entry: ["hooks": [["type": "command",
-                               "command": "\(emit) claude-code turn_done",
-                               "timeout": 540]]]
+                               "command": "\(emit) claude-code turn_done"]]]
         )
         hooks["Notification"] = stripCrierAndAppend(
             hooks["Notification"] as? [[String: Any]],

@@ -1401,6 +1401,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         URLSession.shared.dataTask(with: req).resume()
     }
 
+    /// Convenience wrapper around `CrierEmitCore.buildReplyPost(...)` so
+    /// the call site at submit() reads naturally. The function lives in
+    /// CrierEmitCore (pure Foundation, no UI deps) so the routing logic
+    /// is unit-testable from CrierEmitCoreTests without spawning the UI.
+    static func buildReplyPost(
+        endpoint: String,
+        sessionId: String,
+        text: String,
+        replyChannel: String?,
+        requestId: String?,
+        replyTarget: String?
+    ) -> CrierEmitCore.ReplyPostPlan? {
+        CrierEmitCore.buildReplyPost(
+            endpoint: endpoint,
+            sessionId: sessionId,
+            text: text,
+            replyChannel: replyChannel,
+            requestId: requestId,
+            replyTarget: replyTarget
+        )
+    }
+
     /// Pre-queue path dismiss. Clears any pending engage window on the
     /// daemon so a sync claude-code Stop hook stops blocking the terminal.
     private func postDismiss(sessionId: String) {
@@ -1509,39 +1531,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return lastTerminalApp ?? NSWorkspace.shared.frontmostApplication
         }()
 
-        // Route Send to the right endpoint:
-        //   • hook-stdout-queue (claude-code, pre-queue path) →
-        //     POST /reply/queue keyed on session_id. Wakes whichever
-        //     /reply/drain is currently parked (or stores the text for
-        //     the next drain to find).
-        //   • everything else → legacy POST /reply keyed on request_id.
-        let useQueueEndpoint = (s.replyChannel == "hook-stdout-queue")
-        let postPath = useQueueEndpoint ? "/reply/queue" : "/reply"
+        // Build URL + body via the testable helper so the submit() routing
+        // is exercised by unit tests, not just at runtime in the app.
+        let plan = AppDelegate.buildReplyPost(
+            endpoint: endpoint,
+            sessionId: s.id,
+            text: text,
+            replyChannel: s.replyChannel,
+            requestId: s.requestId,
+            replyTarget: s.replyTarget
+        )
 
-        var body: [String: Any] = ["text": text]
-        body["session_id"] = s.id
-        if !useQueueEndpoint {
-            if let r = s.requestId { body["request_id"] = r }
-            if let c = s.replyChannel { body["channel"] = c }
-            if let t = s.replyTarget { body["target"] = t }
-        }
-
-        if let url = URL(string: "\(endpoint)\(postPath)"),
-           let data = try? JSONSerialization.data(withJSONObject: body) {
-            var req = URLRequest(url: url)
+        if let plan {
+            var req = URLRequest(url: plan.url)
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "content-type")
-            req.httpBody = data
-            // Without a completion handler, network failures are invisible —
-            // the user just sees the panel hide as if the reply landed. Log
-            // the outcome so we can diagnose "submitted but nothing happened".
+            req.httpBody = plan.body
+            // Log every Send so the UI log shows what was posted, win or
+            // lose. Previously only failure paths logged, which made
+            // "send didn't work" reports impossible to diagnose without
+            // a network sniffer.
             let session = s.id
             let chForLog = s.replyChannel ?? "keystroke"
+            uiLog("reply POST sending · session=\(session) · ch=\(chForLog) · url=\(plan.url.path) · bytes=\(plan.body.count)")
             URLSession.shared.dataTask(with: req) { _, resp, err in
                 if let err {
                     uiLog("reply POST failed · session=\(session) · ch=\(chForLog) · err=\(err.localizedDescription)")
                 } else if let http = resp as? HTTPURLResponse, http.statusCode != 200 {
                     uiLog("reply POST non-200 · session=\(session) · ch=\(chForLog) · status=\(http.statusCode)")
+                } else {
+                    uiLog("reply POST ok · session=\(session) · ch=\(chForLog)")
                 }
             }.resume()
         } else {

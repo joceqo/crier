@@ -70,7 +70,7 @@ let package = Package(
         ),
         .testTarget(
             name: "CrierEmitIntegrationTests",
-            dependencies: ["CrierServer"],
+            dependencies: ["CrierServer", "CrierEmitCore"],
             path: "Tests/CrierEmitIntegrationTests"
         ),
         .testTarget(

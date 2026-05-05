@@ -2,6 +2,96 @@ import XCTest
 @testable import CrierEmitCore
 
 final class CrierEmitCoreTests: XCTestCase {
+
+    // MARK: - UI Send routing (CrierEmitCore.buildReplyPost)
+    //
+    // Pin the body shape and endpoint URL CrierUI's submit() produces —
+    // these are the regression guard for "Send from UI doesn't work"
+    // reports. The assertions match exactly what CrierServer's handlers
+    // expect; if either side drifts, this test fails before a user
+    // notices the silently-broken Send.
+
+    func testBuildReplyPostQueuePathPostsToSlashReplyQueueWithSessionAndText() throws {
+        let plan = try XCTUnwrap(CrierEmitCore.buildReplyPost(
+            endpoint: "http://127.0.0.1:8731",
+            sessionId: "claude-code-abc-123",
+            text: "user reply via overlay",
+            replyChannel: "hook-stdout-queue",  // pre-queue path
+            requestId: "C8E1A7C5-…",            // present, but must NOT be sent
+            replyTarget: nil
+        ))
+
+        XCTAssertEqual(plan.url.absoluteString, "http://127.0.0.1:8731/reply/queue")
+
+        let parsed = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: plan.body) as? [String: Any]
+        )
+        XCTAssertEqual(parsed["session_id"] as? String, "claude-code-abc-123")
+        XCTAssertEqual(parsed["text"] as? String, "user reply via overlay")
+        // Critical: queue path must NOT carry request_id / channel /
+        // target — CrierServer's handlePostReplyQueue keys on session_id
+        // only. Sending request_id here would route the body to the
+        // legacy ReplyHub.deliver path and the drain on session_id
+        // would never wake.
+        XCTAssertNil(parsed["request_id"])
+        XCTAssertNil(parsed["channel"])
+        XCTAssertNil(parsed["target"])
+    }
+
+    func testBuildReplyPostLegacyPathPostsToSlashReplyWithRequestIdAndChannel() throws {
+        let plan = try XCTUnwrap(CrierEmitCore.buildReplyPost(
+            endpoint: "http://127.0.0.1:8731",
+            sessionId: "cursor-xyz-789",
+            text: "two",
+            replyChannel: "hook-stdout",        // legacy path (cursor/codex/opencode)
+            requestId: "12345-67890",
+            replyTarget: nil
+        ))
+
+        XCTAssertEqual(plan.url.absoluteString, "http://127.0.0.1:8731/reply")
+
+        let parsed = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: plan.body) as? [String: Any]
+        )
+        XCTAssertEqual(parsed["session_id"] as? String, "cursor-xyz-789")
+        XCTAssertEqual(parsed["text"] as? String, "two")
+        XCTAssertEqual(parsed["request_id"] as? String, "12345-67890")
+        XCTAssertEqual(parsed["channel"] as? String, "hook-stdout")
+    }
+
+    func testBuildReplyPostTmuxChannelCarriesTarget() throws {
+        let plan = try XCTUnwrap(CrierEmitCore.buildReplyPost(
+            endpoint: "http://127.0.0.1:8731",
+            sessionId: "claude-code-tmux",
+            text: "ls -la",
+            replyChannel: "tmux",
+            requestId: nil,
+            replyTarget: "main:0.0"
+        ))
+        let parsed = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: plan.body) as? [String: Any]
+        )
+        XCTAssertEqual(parsed["channel"] as? String, "tmux")
+        XCTAssertEqual(parsed["target"] as? String, "main:0.0")
+    }
+
+    func testBuildReplyPostNilChannelFallsThroughToLegacyPath() throws {
+        // A session that arrived without a reply_channel (e.g., a very
+        // old payload) must fall through to /reply, not accidentally
+        // hit the queue endpoint.
+        let plan = try XCTUnwrap(CrierEmitCore.buildReplyPost(
+            endpoint: "http://127.0.0.1:8731",
+            sessionId: "anon",
+            text: "hello",
+            replyChannel: nil,
+            requestId: "rid",
+            replyTarget: nil
+        ))
+        XCTAssertEqual(plan.url.absoluteString, "http://127.0.0.1:8731/reply")
+    }
+
+    // MARK: - existing tests
+
     func testEmptyMessageDiagnosticFlags() {
         XCTAssertTrue(CrierEmptyMessageDiagnostic.shouldLogEmptyMessage(event: "turn_done"))
         XCTAssertTrue(CrierEmptyMessageDiagnostic.shouldLogEmptyMessage(event: "needs_permission"))
