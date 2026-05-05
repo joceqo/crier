@@ -17,6 +17,11 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
         .package(url: "https://github.com/madebywindmill/MarkdownToAttributedString.git", branch: "main"),
         .package(url: "https://github.com/JohnSundell/Splash.git", from: "0.16.0"),
+        // Highlightr wraps highlight.js (~190 languages) in JavaScriptCore;
+        // gives us NSAttributedString output with theme support. Used for
+        // code blocks where Splash's Swift-only grammar can't help (shell,
+        // JSON, TOML, TypeScript, Python, …).
+        .package(url: "https://github.com/raspu/Highlightr.git", from: "2.2.0"),
     ],
     targets: [
         .target(
@@ -45,6 +50,7 @@ let package = Package(
                 "CrierServer",
                 .product(name: "MarkdownToAttributedString", package: "MarkdownToAttributedString"),
                 .product(name: "Splash", package: "Splash"),
+                .product(name: "Highlightr", package: "Highlightr"),
             ],
             path: "Sources/CrierUI"
         ),

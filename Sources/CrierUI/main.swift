@@ -762,7 +762,9 @@ struct MessageCard: View {
     static func makeStyles() -> MarkdownStyles {
         let body = NSFont.systemFont(ofSize: 14)
         let bodyBold = NSFont.systemFont(ofSize: 14, weight: .semibold)
-        let mono = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        // Code blocks use a smaller mono so directory trees + commented
+        // lines fit without wrapping at the typical panel width.
+        let mono = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         let monoInline = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular)
         let codeFg = NSColor.labelColor
         let codeBg = NSColor.black.withAlphaComponent(0.45)
@@ -778,11 +780,18 @@ struct MessageCard: View {
         listPara.paragraphSpacing = 2
 
         let codePara = NSMutableParagraphStyle()
-        codePara.headIndent = 12
-        codePara.firstLineHeadIndent = 12
-        codePara.paragraphSpacing = 6
-        codePara.paragraphSpacingBefore = 6
-        codePara.lineHeightMultiple = 1.15
+        // Tighter side indent → more horizontal real estate for the
+        // code itself. 6 pt still reads as a code-block left margin
+        // visually (paired with the dark codeBg) but doesn't waste
+        // the ~24 pt the old 12-pt indent ate at both edges.
+        codePara.headIndent = 6
+        codePara.firstLineHeadIndent = 6
+        codePara.paragraphSpacing = 4
+        codePara.paragraphSpacingBefore = 4
+        // Slightly tighter line height — the previous 1.15 made
+        // directory trees feel double-spaced when comments wrapped
+        // (each wrap line picked up the same extra leading).
+        codePara.lineHeightMultiple = 1.05
 
         let headingPara = NSMutableParagraphStyle()
         headingPara.paragraphSpacing = 4
@@ -835,9 +844,9 @@ struct MessageCard: View {
     }
 
     // Compute the rendered text height for our content width and clamp.
-    // Width = panel(620) − root padding(2×20) − card text-container inset(2×16).
+    // Width = panel(700) − root padding(2×20) − card text-container inset(2×16).
     static func clampedHeight(for attr: NSAttributedString) -> CGFloat {
-        let textWidth: CGFloat = 620 - 40 - 32
+        let textWidth: CGFloat = 700 - 40 - 32
         let bounding = attr.boundingRect(
             with: NSSize(width: textWidth, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading]
@@ -912,7 +921,7 @@ struct CrierPanelView: View {
                 .crierCard(cornerRadius: 16)
         }
         .padding(20)
-        .frame(width: 620)
+        .frame(width: 700)
         .fixedSize(horizontal: false, vertical: true)
         .background(
             GeometryReader { proxy in
@@ -1234,7 +1243,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let hosting = NSHostingView(rootView: view)
 
         panel = CrierBorderlessPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 240),
+            contentRect: NSRect(x: 0, y: 0, width: 700, height: 240),
             styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -1309,7 +1318,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // Resize the panel to match SwiftUI's reported ideal size. Width stays
-    // pinned at 620 (the SwiftUI root sets it explicitly); height tracks
+    // pinned at 700 (the SwiftUI root sets it explicitly); height tracks
     // content but is clamped so a runaway message can't fill the screen.
     // `setContentSize` keeps origin.y (the bottom edge in AppKit coords)
     // fixed, so a growing message expands upward and the user's drag
@@ -1317,7 +1326,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applyContentSize(_ size: CGSize) {
         guard size.height > 0 else { return }
         let height = min(max(size.height, 120), 720)
-        let newSize = NSSize(width: 620, height: height)
+        let newSize = NSSize(width: 700, height: height)
         let currentContent = panel.contentRect(forFrameRect: panel.frame).size
         if abs(currentContent.height - height) < 0.5 {
             uiLog("applyContentSize — reported=\(size) current=\(currentContent) → unchanged")
