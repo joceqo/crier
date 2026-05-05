@@ -21,7 +21,13 @@ command -v swift    >/dev/null || { echo "Swift toolchain required" >&2; exit 1;
 command -v codesign >/dev/null || { echo "codesign required (Xcode CLT)" >&2; exit 1; }
 
 echo "==> Building crier-ui + crier-emit (release)"
-( cd "$REPO_DIR" && swift build -c release --product crier-ui --product crier-emit )
+# Two separate `swift build` invocations — `swift build --product A --product B`
+# only honors the LAST `--product` flag (silently skips earlier ones), so a
+# single line like `--product crier-ui --product crier-emit` would build only
+# crier-emit and reuse whatever stale crier-ui is in `.build/release/`. That
+# is exactly how v0.4.0 shipped a v0.3.5 daemon embedded in the bundle.
+( cd "$REPO_DIR" && swift build -c release --product crier-emit )
+( cd "$REPO_DIR" && swift build -c release --product crier-ui )
 
 BIN="$REPO_DIR/.build/release/crier-ui"
 EMIT_BIN="$REPO_DIR/.build/release/crier-emit"
@@ -72,8 +78,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleExecutable</key>          <string>Crier</string>
   <key>CFBundleIconFile</key>            <string>AppIcon</string>
   <key>CFBundlePackageType</key>         <string>APPL</string>
-  <key>CFBundleVersion</key>             <string>0.4.1</string>
-  <key>CFBundleShortVersionString</key>  <string>0.4.1</string>
+  <key>CFBundleVersion</key>             <string>0.4.2</string>
+  <key>CFBundleShortVersionString</key>  <string>0.4.2</string>
   <key>LSMinimumSystemVersion</key>      <string>14.0</string>
   <key>LSUIElement</key>                 <true/>
   <key>NSHumanReadableCopyright</key>    <string>Crier — local agent overlay</string>

@@ -574,9 +574,10 @@ private final class CrierHTTPHandler: ChannelInboundHandler, @unchecked Sendable
             return eventLoop.makeSucceededFuture((.badRequest, "application/json", #"{"error":"missing session_id"}"#))
         }
         let waitMs = Int(comps.queryItems?.first(where: { $0.name == "wait_ms" })?.value ?? "3000") ?? 3000
-        // Cap at 60s — engage extensions can carry waits well past this,
-        // but the base wait shouldn't be set higher by a client.
-        let clamped = max(50, min(60_000, waitMs))
+        // Cap at 600 s. SW's claude-hook polls 300 s; we allow up to
+        // double that so the engage extension has headroom and the
+        // hook's `timeout: 540` (9 min) is the binding ceiling, not us.
+        let clamped = max(50, min(600_000, waitMs))
 
         return ReplyQueueHub.shared.awaitDrain(sessionId: session, eventLoop: eventLoop, baseTimeoutMs: clamped).map { text in
             if let text = text {

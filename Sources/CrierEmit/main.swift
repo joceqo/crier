@@ -396,8 +396,19 @@ if blockingEvent {
     // connected before we get here.
     let replyText: String?
     if useQueueDrain {
+        // 5-minute base wait — matches Superwhisper's claude-hook poll
+        // ceiling (verified in superwhisper-claude-code-plugin-analysis.md
+        // bash MVP: `for _ in $(seq 1 300); do ... sleep 1; done`). The
+        // sync Stop hook can sit on /reply/drain that long without
+        // blocking terminal input — Claude Code accepts keys into the
+        // prompt while the hook runs, and UserPromptSubmit firing pipes
+        // a "dismiss" event which clears the queue and releases the
+        // drain immediately. So during those 5 min the user can type
+        // either in the Crier overlay (drain wakes via /reply/queue) or
+        // in the terminal (drain releases via UserPromptSubmit dismiss),
+        // whichever they prefer.
         log("draining reply queue (session_id=\(fullSessionId))")
-        replyText = drainReplyQueue(sessionId: fullSessionId, baseWaitMs: 3000)
+        replyText = drainReplyQueue(sessionId: fullSessionId, baseWaitMs: 300_000)
     } else {
         log("waiting for overlay reply (request_id=\(requestId))")
         replyText = longPollReply(requestId: requestId, waitSeconds: 540)

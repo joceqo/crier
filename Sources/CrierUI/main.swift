@@ -1460,6 +1460,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         state.upsertFromPayload(obj)
+        // Pre-queue path: as soon as the panel pops for a turn_done,
+        // engage the daemon's drain so it waits long enough for the
+        // user to read the response and start typing. Without this,
+        // the hook's 5 s base window would expire before a human can
+        // realistically reach the keyboard. Esc/Dismiss in the panel
+        // posts /reply/dismiss to cut the wait short on intent.
+        if (obj["reply_channel"] as? String) == "hook-stdout-queue",
+           let sid = obj["session_id"] as? String, !sid.isEmpty {
+            CrierState.postReplyEngage(sessionId: sid)
+        }
         if CrierEmptyMessageDiagnostic.shouldLogEmptyMessage(event: kind),
            CrierEmptyMessageDiagnostic.isEffectivelyEmptyMessage(obj["message"] as? String) {
             var rec: [String: Any] = [

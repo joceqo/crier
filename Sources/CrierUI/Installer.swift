@@ -127,17 +127,29 @@ enum Installer {
         var hooks = (json["hooks"] as? [String: Any]) ?? [:]
         // Stop / Notification / PermissionRequest / PreToolUse / UserPromptSubmit.
         // Schema mirrors install-local-claude-code.sh — kept in sync deliberately.
-        // No `async` or `timeout` on Stop: under the pre-queue architecture
-        // (see crier-prequeue-architecture.md) crier-emit drains its reply
-        // queue with a short ~3 s initial window and only extends while the
-        // user is actively engaging the overlay. That matches Superwhisper's
-        // Stop-hook shape (sync, no fixed ceiling) and avoids the
-        // "Stop hook error" UI label that fired every time decision:block
-        // landed under the previous async+timeout config.
+        //
+        // Sync hook (no `async: true`) with `timeout: 540` (9 min):
+        //   • Sync avoids the "Stop hook error" UI label async hooks light
+        //     up on every reply (anthropics/claude-code#10463 / #34600 /
+        //     #39953).
+        //   • timeout: 540 is the explicit ceiling — without it,
+        //     claude-code's default sync hook timeout (60 s) SIGTERMs the
+        //     hook before crier-emit's 5-min /reply/drain finishes.
+        //   • While the hook is parked, claude-code's TUI accepts
+        //     keystrokes into its prompt buffer; if the user hits Enter,
+        //     UserPromptSubmit fires (mapped to `crier-emit claude-code
+        //     dismiss` below), which posts event="dismiss" and the daemon
+        //     clears the drain immediately. So the user can answer in
+        //     the Crier overlay OR in the terminal — whichever they
+        //     prefer wins, no race.
+        //   • Matches Superwhisper's claude-hook shape (sync, ~5-min
+        //     poll, UserPromptSubmit-cancels-poll) verified in
+        //     superwhisper-claude-code-plugin-analysis.md.
         hooks["Stop"] = stripCrierAndAppend(
             hooks["Stop"] as? [[String: Any]],
             entry: ["hooks": [["type": "command",
-                               "command": "\(emit) claude-code turn_done"]]]
+                               "command": "\(emit) claude-code turn_done",
+                               "timeout": 540]]]
         )
         hooks["Notification"] = stripCrierAndAppend(
             hooks["Notification"] as? [[String: Any]],
