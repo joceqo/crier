@@ -139,18 +139,40 @@ final class CrierState: ObservableObject, @unchecked Sendable {
         let sid = (sidRaw?.isEmpty == false) ? sidRaw! : UUID().uuidString
 
         var next = sessions
+        let isNewSession: Bool
         if let idx = next.firstIndex(where: { $0.id == sid }) {
             let old = next[idx]
             let newRid = obj["request_id"] as? String
             var incoming = CrierSession.fromPayload(obj, id: sid)
             if newRid == old.requestId { incoming.replyDraft = old.replyDraft }
             next[idx] = incoming
+            isNewSession = false
         } else {
             next.append(CrierSession.fromPayload(obj, id: sid))
+            isNewSession = true
         }
         next.sort { $0.receivedAt > $1.receivedAt }
         sessions = next
-        if selectedSessionKey == nil { selectedSessionKey = sid }
+
+        // Tab-selection rule for parallel sessions:
+        //   • No tab selected yet → select the incoming one.
+        //   • Currently-selected session has an empty replyDraft (user
+        //     hasn't started typing) → swap to the freshly-arrived
+        //     session so the panel shows the latest pop. Without this,
+        //     a second discussion firing while a first is up never
+        //     gets surfaced beyond a small tab — which the user
+        //     reported as "Crier shows one discussion but blocks
+        //     another."
+        //   • Otherwise (user is mid-typing in another tab) → leave
+        //     selection alone. The new tab is still visible in the
+        //     SessionTabStrip; user can switch when ready.
+        if selectedSessionKey == nil {
+            selectedSessionKey = sid
+        } else if isNewSession,
+                  let current = next.first(where: { $0.id == selectedSessionKey }),
+                  current.replyDraft.isEmpty {
+            selectedSessionKey = sid
+        }
         focusGen += 1
     }
 

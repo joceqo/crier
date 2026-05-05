@@ -300,6 +300,49 @@ final class CrierServerTests: XCTestCase {
         XCTAssertEqual(resp.statusCode, 204)
     }
 
+    /// Two parallel sessions must drain independently — POSTing to
+    /// session B's queue must NOT wake session A's parked drain, and
+    /// vice versa. Regression guard for the user-reported "Crier shows
+    /// one discussion but blocks another thread" scenario.
+    func testTwoSessionsDrainIndependently() {
+        let sidA = "test-multi-A-\(UUID().uuidString)"
+        let sidB = "test-multi-B-\(UUID().uuidString)"
+
+        var resultA: (Data, HTTPURLResponse)?
+        var resultB: (Data, HTTPURLResponse)?
+        let semA = DispatchSemaphore(value: 0)
+        let semB = DispatchSemaphore(value: 0)
+
+        // Park both drains.
+        DispatchQueue.global().async {
+            resultA = self.get("/reply/drain?session_id=\(sidA)&wait_ms=2000", timeout: 4)
+            semA.signal()
+        }
+        DispatchQueue.global().async {
+            resultB = self.get("/reply/drain?session_id=\(sidB)&wait_ms=2000", timeout: 4)
+            semB.signal()
+        }
+        Thread.sleep(forTimeInterval: 0.1)
+
+        // Wake only session B's drain — A must still be parked.
+        post("/reply/queue", body: ["session_id": sidB, "text": "B-only"])
+
+        _ = semB.wait(timeout: .now() + 4)
+        guard let (dataB, respB) = resultB else { return XCTFail("B got no response") }
+        XCTAssertEqual(respB.statusCode, 200)
+        XCTAssertEqual(String(data: dataB, encoding: .utf8), "B-only",
+            "session B should have received its own queued reply")
+
+        // Now wake A explicitly with different text.
+        post("/reply/queue", body: ["session_id": sidA, "text": "A-only"])
+
+        _ = semA.wait(timeout: .now() + 4)
+        guard let (dataA, respA) = resultA else { return XCTFail("A got no response") }
+        XCTAssertEqual(respA.statusCode, 200)
+        XCTAssertEqual(String(data: dataA, encoding: .utf8), "A-only",
+            "session A's drain must NOT have been touched by B's queue POST — texts can't cross-contaminate")
+    }
+
     /// Empty queue text is dropped — UI's "Send" button is already disabled
     /// when the draft is empty, but a stray POST must not fire a phantom
     /// decision:block.
