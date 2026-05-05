@@ -396,20 +396,25 @@ if blockingEvent {
     // connected before we get here.
     let replyText: String?
     if useQueueDrain {
-        // 10-minute base wait — matches what we measured Superwhisper's
-        // claude-hook actually does in practice (held a polling thread
-        // for 373 s before a user reply landed; never timed out on its
-        // own in our tests). The sync Stop hook can sit on /reply/drain
-        // that long without blocking terminal input — Claude Code
-        // accepts keys into the prompt while the hook runs, and
-        // UserPromptSubmit firing posts a "dismiss" event which clears
-        // the queue and releases the drain immediately. So during those
-        // 10 minutes the user can type either in the Crier overlay
-        // (drain wakes via /reply/queue) or in the terminal (drain
-        // releases via UserPromptSubmit dismiss) — whichever they
-        // prefer wins.
+        // 9-minute base wait — empirically calibrated against
+        // claude-code's default sync hook timeout. We measured (test
+        // /tmp/crier-timeout-test, 2026-05-05): a hook with no `timeout`
+        // field ran ~600 s before claude-code SIGKILL'd it. So 600 s
+        // is the hard ceiling; setting `timeout` higher doesn't help
+        // because claude-code's docs cap that field at 600. Drain at
+        // 540_000 ms (9 min) returns nil cleanly with a 60 s safety
+        // margin under the killer — the hook prints its final log
+        // line and exits 0 before SIGKILL would fire.
+        //
+        // While the drain runs, claude-code's TUI accepts keystrokes
+        // into its prompt buffer; UserPromptSubmit firing posts a
+        // "dismiss" event which clears the queue and releases the
+        // drain immediately. So during those 9 minutes the user can
+        // type either in the Crier overlay (drain wakes via
+        // /reply/queue) or in the terminal (drain releases via
+        // UserPromptSubmit dismiss) — whichever they prefer wins.
         log("draining reply queue (session_id=\(fullSessionId))")
-        replyText = drainReplyQueue(sessionId: fullSessionId, baseWaitMs: 600_000)
+        replyText = drainReplyQueue(sessionId: fullSessionId, baseWaitMs: 540_000)
     } else {
         log("waiting for overlay reply (request_id=\(requestId))")
         replyText = longPollReply(requestId: requestId, waitSeconds: 540)
