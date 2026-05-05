@@ -1,5 +1,5 @@
 import AppKit
-import Highlightr
+import Highlighter
 import MarkdownToAttributedString
 import Splash
 
@@ -8,10 +8,13 @@ import Splash
 /// Two-stage strategy:
 ///   • If a block looks like Swift, use Splash (Sundell theme — Swift-
 ///     specific lexer, slightly nicer than highlight.js for our domain).
-///   • Otherwise route through Highlightr, which wraps highlight.js and
-///     supports ~190 languages with auto-detection. Every other code
-///     block previously rendered as plain monospace; now shell, JSON,
-///     TypeScript, Python, etc. all get coloured.
+///   • Otherwise route through HighlighterSwift, which wraps the
+///     current highlight.js (~190 languages) with auto-detection. Every
+///     other code block previously rendered as plain monospace; now
+///     shell, JSON, TypeScript, Python, etc. all get coloured.
+///
+/// Switched from raspu/Highlightr (unmaintained as of 2026) to
+/// smittytone/HighlighterSwift (active fork, current highlight.js 11.x).
 enum CodeBlockSplashHighlighting {
     nonisolated(unsafe) private static let splashHighlighter = SyntaxHighlighter(
         format: AttributedStringOutputFormat(
@@ -19,16 +22,16 @@ enum CodeBlockSplashHighlighting {
         )
     )
 
-    /// Highlightr instance lazily configured once. JavaScriptCore lives
-    /// behind it; reusing the same instance avoids spinning up a fresh
-    /// JSContext per code block (which adds ~100 ms per block).
-    nonisolated(unsafe) private static let highlightr: Highlightr? = {
-        let h = Highlightr()
+    /// HighlighterSwift instance configured once at first use.
+    /// JavaScriptCore lives behind it; reusing the instance avoids
+    /// spinning up a fresh JSContext per code block.
+    nonisolated(unsafe) private static let highlighter: Highlighter? = {
+        let h = Highlighter()
         // Atom one-dark reads well over the panel's translucent dark
         // codeBg. Other dark themes that work: monokai-sublime,
         // androidstudio, gruvbox-dark, vs2015. Light-only themes
         // (xcode, github) wash out against the dark backdrop.
-        h?.setTheme(to: "atom-one-dark")
+        _ = h?.setTheme("atom-one-dark")
         return h
     }()
 
@@ -79,20 +82,21 @@ enum CodeBlockSplashHighlighting {
     }
 
     private static func applyHighlightr(attr: NSMutableAttributedString, range: NSRange, code: String) {
-        guard let highlightr = highlightr else { return }
+        guard let highlighter = highlighter else { return }
         // `as: nil` triggers highlight.js auto-detection. Works well
         // on shell/JSON/TS/Python/etc.; for tiny snippets (1–2 lines)
         // detection can guess wrong, but the worst case is "looks like
         // unstyled mono" which is what we had before this change.
-        guard let highlighted = highlightr.highlight(code, as: nil, fastRender: true),
+        guard let highlighted = highlighter.highlight(code, as: nil),
               highlighted.length > 0 else { return }
         replace(in: attr, range: range, with: highlighted)
     }
 
-    /// Carry the original paragraph style + dark codeBg over the
-    /// freshly-highlighted attributed string before splicing it back
-    /// in. Without this, the new fragment loses its head indent and
-    /// background fill.
+    /// Carry the original paragraph style over the freshly-highlighted
+    /// attributed string before splicing it back in. The paragraph
+    /// style carries the NSTextBlock that paints the full-width dark
+    /// background, so without re-applying it the highlighted block
+    /// would lose its head-indent + continuous BG.
     private static func replace(
         in attr: NSMutableAttributedString,
         range: NSRange,
@@ -104,8 +108,6 @@ enum CodeBlockSplashHighlighting {
         if let para {
             merged.addAttribute(.paragraphStyle, value: para, range: whole)
         }
-        let codeBg = NSColor.black.withAlphaComponent(0.45)
-        merged.addAttribute(.backgroundColor, value: codeBg, range: whole)
         attr.replaceCharacters(in: range, with: merged)
     }
 }
