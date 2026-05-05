@@ -789,7 +789,11 @@ struct MessageCard: View {
         let mono = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         let monoInline = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular)
         let codeFg = NSColor.labelColor
-        let codeBg = NSColor.black.withAlphaComponent(0.45)
+        // Lighter codeBg so the code block reads as a SUBTLE tint
+        // against the panel vibrancy, not a heavy slab. The previous
+        // 0.45 alpha looked like a separate solid card painted on
+        // top of the panel.
+        let codeBg = NSColor.black.withAlphaComponent(0.18)
         let inlineCodeBg = NSColor.white.withAlphaComponent(0.10)
 
         // Italic via font descriptor — not all weights have a system italic.

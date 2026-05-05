@@ -27,11 +27,20 @@ enum CodeBlockSplashHighlighting {
     /// spinning up a fresh JSContext per code block.
     nonisolated(unsafe) private static let highlighter: Highlighter? = {
         let h = Highlighter()
-        // Atom one-dark reads well over the panel's translucent dark
-        // codeBg. Other dark themes that work: monokai-sublime,
-        // androidstudio, gruvbox-dark, vs2015. Light-only themes
-        // (xcode, github) wash out against the dark backdrop.
-        _ = h?.setTheme("atom-one-dark")
+        // monokai-sublime gives the broadest token-color distribution
+        // for our case (purple identifiers, orange numbers, green
+        // strings, pink keywords) — visually distinct each token type
+        // is a different color, which matches the user's "compare ui"
+        // target screenshot. atom-one-dark looks washed-out by
+        // comparison: most tokens stay in the red/orange family.
+        // setTheme returns false if the name doesn't match a bundled
+        // theme — log the failure rather than silently falling back to
+        // highlight.js's default light-on-light theme.
+        if h?.setTheme("monokai-sublime") != true {
+            FileHandle.standardError.write(Data(
+                "CrierUI: HighlighterSwift could not load 'monokai-sublime' — falling back to library default\n".utf8
+            ))
+        }
         return h
     }()
 
