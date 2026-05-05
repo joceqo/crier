@@ -67,6 +67,14 @@ if [ -d "$REPO_DIR/assets/icons" ]; then
     echo "==> Copied $(/bin/ls "$REPO_DIR"/assets/icons/*.svg 2>/dev/null | /usr/bin/wc -l | /usr/bin/tr -d ' ') brand icons"
 fi
 
+# SPM embeds agent SVGs in Crier_CrierUI.bundle next to the binary; copy it so
+# `Bundle.module` resolves inside the signed .app (not only loose *.svg above).
+UIBUNDLE="$(/usr/bin/find "$REPO_DIR/.build" -maxdepth 5 -type d -name 'Crier_CrierUI.bundle' 2>/dev/null | /usr/bin/head -1)"
+if [ -n "$UIBUNDLE" ]; then
+    /bin/cp -R "$UIBUNDLE" "$APP/Contents/Resources/"
+    echo "==> Copied $(/usr/bin/basename "$UIBUNDLE") for Bundle.module"
+fi
+
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -78,8 +86,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleExecutable</key>          <string>Crier</string>
   <key>CFBundleIconFile</key>            <string>AppIcon</string>
   <key>CFBundlePackageType</key>         <string>APPL</string>
-  <key>CFBundleVersion</key>             <string>0.4.8</string>
-  <key>CFBundleShortVersionString</key>  <string>0.4.8</string>
+  <key>CFBundleVersion</key>             <string>0.5.0</string>
+  <key>CFBundleShortVersionString</key>  <string>0.5.0</string>
   <key>LSMinimumSystemVersion</key>      <string>14.0</string>
   <key>LSUIElement</key>                 <true/>
   <key>NSHumanReadableCopyright</key>    <string>Crier — local agent overlay</string>

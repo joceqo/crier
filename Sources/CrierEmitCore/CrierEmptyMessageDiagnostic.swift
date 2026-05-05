@@ -1,8 +1,9 @@
 import Foundation
 
-/// Append-only JSONL at `~/.claude/crier-empty-message.jsonl` when the Crier panel would show
-/// the “No assistant message was read…” placeholder. Each line is one JSON object you can
-/// paste to another model for triage (`kind` + `source` identify where it was recorded).
+/// Append-only JSONL at `~/.claude/crier-empty-message.jsonl` when the Crier
+/// panel opens but the event’s `message` is empty (transcript extraction miss,
+/// timing, etc.). Each line is one JSON object you can paste to another model
+/// for triage (`kind` + `source` identify where it was recorded).
 public enum CrierEmptyMessageDiagnostic {
     nonisolated(unsafe) private static let iso8601: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
@@ -18,7 +19,7 @@ public enum CrierEmptyMessageDiagnostic {
         iso8601.string(from: Date())
     }
 
-    /// Events whose empty `message` produces the transcript placeholder in `crier-ui`.
+    /// Events whose empty `message` still surfaces the panel in `crier-ui`.
     public static func shouldLogEmptyMessage(event: String) -> Bool {
         switch event {
         case "turn_done", "needs_permission", "needs_input": true

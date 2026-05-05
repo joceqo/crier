@@ -20,13 +20,22 @@ import SwiftUI
 
 private let endpoint = ProcessInfo.processInfo.environment["CRIER_ENDPOINT"] ?? "http://127.0.0.1:8731"
 
-// Append a line to ~/.claude/crier-ui.log. Same shape as crier-emit's log so
-// the two can be tail -f'd together when debugging end-to-end. Used to trace
-// SwiftUI sizing, panel resizes, event handling, and reply delivery without
-// needing to attach a debugger to the GUI process.
+private func uiLogFilePath() -> String {
+    let fm = FileManager.default
+    guard let dir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+        .appendingPathComponent("Crier", isDirectory: true) else {
+        return (NSTemporaryDirectory() as NSString).appendingPathComponent("crier-ui.log")
+    }
+    try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    return dir.appendingPathComponent("crier-ui.log").path
+}
+
+// Append a line to ~/Library/Application Support/Crier/crier-ui.log — neutral
+// path (not under ~/.claude, which is only Claude Code’s config). Same general
+// shape as crier-emit’s log lines for end-to-end debugging.
 @inline(__always)
 private func uiLog(_ msg: String) {
-    let path = (NSHomeDirectory() as NSString).appendingPathComponent(".claude/crier-ui.log")
+    let path = uiLogFilePath()
     let stamp = ISO8601DateFormatter().string(from: Date())
     let line = "[\(stamp)] [pid:\(getpid())] \(msg)\n"
     let data = line.data(using: .utf8) ?? Data()
@@ -44,7 +53,7 @@ private func uiLog(_ msg: String) {
 // fallback for events without a `reply_channel` — every supported agent now
 // uses hook-stdout / tmux / http-poll, so this path is rarely hit. When it
 // is hit and the user hasn't manually granted Accessibility, CGEventPost is
-// silently filtered and the failure shows up in ~/.claude/crier-ui.log via
+// silently filtered and the failure shows up in the UI log via
 // the POST /reply completion handler. Each character goes through
 // CGEventKeyboardSetUnicodeString with virtualKey 0, the canonical
 // "type this Unicode regardless of keyboard layout" trick.
@@ -101,9 +110,7 @@ struct CrierSession: Identifiable, Equatable {
 
     static func fromPayload(_ obj: [String: Any], id: String) -> CrierSession {
         let cwd = obj["cwd"] as? String
-        let proj: String
-        if let c = cwd, !c.isEmpty { proj = (c as NSString).lastPathComponent }
-        else { proj = "" }
+        let proj = Self.displayProjectTitle(fromWorkingDirectory: cwd)
         return CrierSession(
             id: id,
             receivedAt: Date(),
@@ -119,6 +126,31 @@ struct CrierSession: Identifiable, Equatable {
             terminalPid: (obj["terminal_pid"] as? Int).map { Int32($0) },
             replyDraft: ""
         )
+    }
+
+    /// Badge / tab line derived from `cwd`’s last path segment. Maps home
+    /// config dirs like `~/.claude` to a short readable label instead of
+    /// showing a dot-folder name.
+    private static func displayProjectTitle(fromWorkingDirectory cwd: String?) -> String {
+        guard let cwd, !cwd.isEmpty else { return "" }
+        let path = (cwd as NSString).standardizingPath
+        let home = (NSHomeDirectory() as NSString).standardizingPath
+        let last = (path as NSString).lastPathComponent
+        let parent = ((path as NSString).deletingLastPathComponent as NSString).standardizingPath
+
+        if last == ".claude" { return parent == home ? "Claude" : (parent as NSString).lastPathComponent }
+        if parent == home, last.hasPrefix("."), last.count > 1 {
+            switch last {
+            case ".cursor": return "Cursor"
+            case ".codex": return "Codex"
+            case ".opencode": return "OpenCode"
+            case ".config": return "Config"
+            default:
+                let tail = String(last.dropFirst())
+                return tail.isEmpty ? "…" : tail.capitalized
+            }
+        }
+        return last
     }
 }
 
@@ -523,19 +555,39 @@ struct WindowDragRegion: NSViewRepresentable {
 }
 
 // Each visible element (badge pill, message card, input card) gets this:
-// - .menu material (light translucent), behind-window blending so the
-//   terminal text is visible through it.
-// - Rounded corners with a hairline stroke for edge definition.
+// a self-contained card with its own background + rounded corners +
+// hairline stroke. Older versions used `NSVisualEffectView` with
+// `.behindWindow` blending so the desktop showed through, which made
+// every screenshot look different — dark terminal behind → dark
+// panel, bright IDE/browser behind → washed-out tinted panel.
+//
+// New approach: `.menu` material with `.withinWindow` blending. The
+// material paints a consistent light vibrancy regardless of the
+// desktop, but unlike `.behindWindow` mode it doesn't sample the
+// desktop colours at all — it only blends within the window's own
+// content. A solid `controlBackgroundColor` underneath provides the
+// floor color so even if vibrancy is disabled (Reduce Transparency
+// system setting), the panel still has a consistent light surface.
 extension View {
     func crierCard(cornerRadius: CGFloat = 14) -> some View {
         self
             .background {
-                VisualEffectView(material: .menu, blendingMode: .behindWindow)
+                ZStack {
+                    // Solid base — system-adaptive surface color.
+                    // In dark mode this is a darkish gray; in light
+                    // mode a light gray. Either way, consistent
+                    // across desktops because no transparency.
+                    Color(nsColor: .controlBackgroundColor)
+                    // Light frosted vibrancy on top, blending
+                    // *within* the window only. No desktop bleed.
+                    VisualEffectView(material: .menu, blendingMode: .withinWindow)
+                        .opacity(0.85)
+                }
             }
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .strokeBorder(.white.opacity(0.06), lineWidth: 1)
+                    .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
             )
     }
 }
@@ -605,7 +657,7 @@ struct AgentBadge: View {
     @ViewBuilder
     private var agentIcon: some View {
         let assetName = iconAssetName(for: agent)
-        if !assetName.isEmpty, let img = NSImage(named: assetName) {
+        if !assetName.isEmpty, let img = AgentBrandIcon.image(named: assetName) {
             // Single-color SVGs (claude.svg) are loaded as template images
             // so SwiftUI's foregroundStyle tints them. The colored ones
             // (claudecode-color, codex-color, opencode) keep their own fill.
@@ -711,192 +763,30 @@ private struct SessionTabStrip: View {
     }
 }
 
-// Renders the agent's last assistant message via NSTextView (reliable
-// drag-to-select + Cmd+C inside the non-activating panel) with the markdown
-// converted to an NSAttributedString by MarkdownToAttributedString. The
-// converter uses Apple's swift-markdown parser under the hood, so fenced
-// code blocks, lists, headings, blockquotes, and inline styles all become
-// attributed-string runs we can hand directly to the text view.
-struct MessageBody: NSViewRepresentable {
-    let attributed: NSAttributedString
-
-    func makeNSView(context: Context) -> NSScrollView {
-        let scroll = NSScrollView()
-        scroll.drawsBackground = false
-        scroll.borderType = .noBorder
-        scroll.hasVerticalScroller = true
-        scroll.hasHorizontalScroller = false
-        scroll.autohidesScrollers = true
-
-        let tv = NSTextView()
-        tv.isEditable = false
-        tv.isSelectable = true
-        tv.drawsBackground = false
-        tv.textContainerInset = NSSize(width: 16, height: 16)
-        tv.allowsUndo = false
-        tv.font = .systemFont(ofSize: 14)
-        tv.isVerticallyResizable = true
-        tv.isHorizontallyResizable = false
-        tv.autoresizingMask = [.width]
-        tv.textContainer?.widthTracksTextView = true
-        tv.textContainer?.containerSize = NSSize(
-            width: 0,
-            height: CGFloat.greatestFiniteMagnitude
-        )
-
-        scroll.documentView = tv
-        return scroll
-    }
-
-    func updateNSView(_ scroll: NSScrollView, context: Context) {
-        guard let tv = scroll.documentView as? NSTextView else { return }
-        tv.textStorage?.setAttributedString(attributed)
-    }
-}
-
-// Card sizes itself to the rendered markdown height, clamped to a sane
-// range. A short reply ("Working. What can I help you with?") gets a tight
-// pill; long replies cap at 240pt and scroll inside the NSTextView.
+/// Renders the agent's last assistant message as a SwiftUI view tree
+/// via `MarkdownContent`. Replaces the previous NSTextView pipeline
+/// (NSAttributedString + NSTextBlock) so we can put real SwiftUI
+/// `.background` + `.clipShape(RoundedRectangle)` on per-block code
+/// containers — something NSAttributedString's per-glyph attributes
+/// could only approximate as rectangles.
+///
+/// Sizing: the inner ScrollView lets the message area scroll
+/// vertically when the panel hits its 720 pt height ceiling
+/// (clamped in AppDelegate.applyContentSize). Below the ceiling the
+/// panel grows naturally with content, reported up via
+/// `PanelContentSizeKey`.
 struct MessageCard: View {
     let text: String
 
     var body: some View {
-        let attr = MessageCard.renderMarkdown(text)
-        return MessageBody(attributed: attr)
-            .frame(maxWidth: .infinity)
-            .frame(height: MessageCard.clampedHeight(for: attr))
-            .crierCard()
-    }
-
-    static func renderMarkdown(_ s: String) -> NSAttributedString {
-        let styles = makeStyles()
-        let opts = FormattingOptions(addCustomMarkdownElementAttributes: true)
-        let base = AttributedStringFormatter.format(markdown: s, styles: styles, options: opts)
-        let mutable = NSMutableAttributedString(attributedString: base)
-        CodeBlockSplashHighlighting.applyToLikelySwiftCodeBlocks(mutable)
-        return mutable
-    }
-
-    // Custom MarkdownStyles tuned for the overlay panel: bold readable
-    // headings, full-contrast body and list text (the library default uses
-    // dark/light grays that disappear against dark vibrancy), and a
-    // distinct dark background for code blocks.
-    static func makeStyles() -> MarkdownStyles {
-        let body = NSFont.systemFont(ofSize: 14)
-        let bodyBold = NSFont.systemFont(ofSize: 14, weight: .semibold)
-        // Code blocks use a smaller mono so directory trees + commented
-        // lines fit without wrapping at the typical panel width.
-        let mono = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-        let monoInline = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular)
-        let codeFg = NSColor.labelColor
-        // Lighter codeBg so the code block reads as a SUBTLE tint
-        // against the panel vibrancy, not a heavy slab. The previous
-        // 0.45 alpha looked like a separate solid card painted on
-        // top of the panel.
-        let codeBg = NSColor.black.withAlphaComponent(0.18)
-        let inlineCodeBg = NSColor.white.withAlphaComponent(0.10)
-
-        // Italic via font descriptor — not all weights have a system italic.
-        let italicDesc = body.fontDescriptor.withSymbolicTraits(.italic)
-        let italic = NSFont(descriptor: italicDesc, size: 14) ?? body
-
-        let listPara = NSMutableParagraphStyle()
-        listPara.headIndent = 18
-        listPara.firstLineHeadIndent = 0
-        listPara.paragraphSpacing = 2
-
-        let codePara = NSMutableParagraphStyle()
-        // Tighter side indent → more horizontal real estate for the
-        // code itself. 6 pt still reads as a code-block left margin
-        // visually (paired with the dark codeBg) but doesn't waste
-        // the ~24 pt the old 12-pt indent ate at both edges.
-        codePara.headIndent = 6
-        codePara.firstLineHeadIndent = 6
-        codePara.paragraphSpacing = 4
-        codePara.paragraphSpacingBefore = 4
-        // Slightly tighter line height — the previous 1.15 made
-        // directory trees feel double-spaced when comments wrapped
-        // (each wrap line picked up the same extra leading).
-        codePara.lineHeightMultiple = 1.05
-
-        // Full-width background via NSTextBlock so the code block reads
-        // as one continuous panel, not per-line dark "pills" (which is
-        // what raw .backgroundColor on glyph runs looks like — every
-        // line ends at its own text length). The block paints a solid
-        // rectangle behind the entire paragraph spanning the text
-        // container, regardless of individual line lengths.
-        let codeBlock = NSTextBlock()
-        codeBlock.setContentWidth(100, type: .percentageValueType)
-        codeBlock.backgroundColor = codeBg
-        // padding is a Layer (interior space inside the block, between
-        // background fill and the text); use setWidth(_:type:for:) with
-        // a single .padding key for all edges. Verified against
-        // NSTextBlock.Layer cases (.padding / .border / .margin).
-        codeBlock.setWidth(8, type: .absoluteValueType, for: .padding)
-        codePara.textBlocks = [codeBlock]
-
-        let headingPara = NSMutableParagraphStyle()
-        headingPara.paragraphSpacing = 4
-        headingPara.paragraphSpacingBefore = 6
-
-        var styles = MarkdownStyles(
-            baseAttributes: [
-                .font: body,
-                .foregroundColor: NSColor.labelColor,
-            ],
-            styleAttributes: [
-                .strong: [.font: bodyBold],
-                .emphasis: [.font: italic],
-                .strikethrough: [
-                    .strikethroughStyle: NSUnderlineStyle.single.rawValue,
-                    .strikethroughColor: NSColor.tertiaryLabelColor,
-                ],
-                .heading: [
-                    .font: NSFont.systemFont(ofSize: 18, weight: .bold),
-                    .foregroundColor: NSColor.labelColor,
-                    .paragraphStyle: headingPara,
-                ],
-                .listItem: [
-                    .font: body,
-                    .foregroundColor: NSColor.labelColor,
-                    .paragraphStyle: listPara,
-                ],
-                .unorderedList: [.paragraphStyle: listPara],
-                .orderedList: [.paragraphStyle: listPara],
-                .inlineCode: [
-                    .font: monoInline,
-                    .foregroundColor: codeFg,
-                    .backgroundColor: inlineCodeBg,
-                ],
-                .codeBlock: [
-                    .font: mono,
-                    .foregroundColor: codeFg,
-                    // No per-glyph .backgroundColor here — the
-                    // full-width fill comes from codePara's NSTextBlock
-                    // above. Adding both would double-paint.
-                    .paragraphStyle: codePara,
-                ],
-                .link: [
-                    .font: body,
-                    .foregroundColor: NSColor.linkColor,
-                    .underlineStyle: NSUnderlineStyle.single.rawValue,
-                ],
-            ]
-        )
-        styles.headingPointSizes = [22, 19, 17, 15, 14, 13]
-        return styles
-    }
-
-    // Compute the rendered text height for our content width and clamp.
-    // Width = panel(820) − root padding(2×20) − card text-container inset(2×16).
-    static func clampedHeight(for attr: NSAttributedString) -> CGFloat {
-        let textWidth: CGFloat = 820 - 40 - 32
-        let bounding = attr.boundingRect(
-            with: NSSize(width: textWidth, height: .greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin, .usesFontLeading]
-        )
-        let raw = ceil(bounding.height) + 32  // re-add the inset for the card frame
-        return Swift.min(Swift.max(raw, 56), 240)
+        ScrollView(.vertical, showsIndicators: true) {
+            MarkdownContent(markdown: text)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(maxHeight: 460)
+        .crierCard()
     }
 }
 
@@ -951,21 +841,16 @@ struct CrierPanelView: View {
             // crier-emit found no last assistant line in the transcript (new
             // session, timing, or parse miss) — still show a placeholder.
             let msg = selected?.message ?? ""
-            // `id(msg)` resets the wrapper's @State (summary cache, loading
-            // flag) when the message changes, so the next turn starts fresh
-            // instead of rendering a stale summary.
-            MessageWithOptionalSummary(
-                text: msg.isEmpty
-                    ? "No assistant message was read from the transcript. You can still reply below."
-                    : msg
-            )
-            .id(msg)
+            if !msg.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                MessageWithOptionalSummary(text: msg)
+                    .id(msg)
+            }
 
             inputCard
                 .crierCard(cornerRadius: 16)
         }
         .padding(20)
-        .frame(width: 820)
+        .frame(width: 640)
         .fixedSize(horizontal: false, vertical: true)
         .background(
             GeometryReader { proxy in
@@ -1287,7 +1172,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let hosting = NSHostingView(rootView: view)
 
         panel = CrierBorderlessPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 820, height: 240),
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 240),
             styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -1362,7 +1247,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // Resize the panel to match SwiftUI's reported ideal size. Width stays
-    // pinned at 820 (the SwiftUI root sets it explicitly); height tracks
+    // pinned at 640 (the SwiftUI root sets it explicitly); height tracks
     // content but is clamped so a runaway message can't fill the screen.
     // `setContentSize` keeps origin.y (the bottom edge in AppKit coords)
     // fixed, so a growing message expands upward and the user's drag
@@ -1370,7 +1255,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applyContentSize(_ size: CGSize) {
         guard size.height > 0 else { return }
         let height = min(max(size.height, 120), 720)
-        let newSize = NSSize(width: 820, height: height)
+        let newSize = NSSize(width: 640, height: height)
         let currentContent = panel.contentRect(forFrameRect: panel.frame).size
         if abs(currentContent.height - height) < 0.5 {
             uiLog("applyContentSize — reported=\(size) current=\(currentContent) → unchanged")
@@ -1559,8 +1444,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if let rid = obj["request_id"] as? String { rec["request_id"] = rid }
             rec["payload_keys"] = obj.keys.sorted().map { $0 }
             if let tp = obj["transcript_path"] as? String, !tp.isEmpty { rec["transcript_path"] = tp }
-            rec["crier_ui_log"] = (NSHomeDirectory() as NSString).appendingPathComponent(".claude/crier-ui.log")
-            rec["note"] = "Panel showed the transcript placeholder; correlate with empty_assistant_extract / empty_message_event lines with nearby ts."
+            rec["crier_ui_log"] = uiLogFilePath()
+            rec["note"] = "Panel opened with an empty assistant `message`; correlate with empty_assistant_extract / empty_message_event lines with nearby ts."
             CrierEmptyMessageDiagnostic.append(record: rec)
         }
         showPanel()

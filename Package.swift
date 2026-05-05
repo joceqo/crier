@@ -16,6 +16,11 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
         .package(url: "https://github.com/madebywindmill/MarkdownToAttributedString.git", branch: "main"),
+        // swift-markdown — Apple's official CommonMark-compatible parser.
+        // Already transitive via MarkdownToAttributedString; declared
+        // explicitly here so MarkdownContent.swift can import the
+        // `Markdown` module directly and walk the AST itself.
+        .package(url: "https://github.com/swiftlang/swift-markdown.git", branch: "main"),
         .package(url: "https://github.com/JohnSundell/Splash.git", from: "0.16.0"),
         // HighlighterSwift wraps highlight.js (~190 languages) — actively
         // maintained fork (Highlightr is unmaintained as of 2026). Same
@@ -51,8 +56,13 @@ let package = Package(
                 .product(name: "MarkdownToAttributedString", package: "MarkdownToAttributedString"),
                 .product(name: "Splash", package: "Splash"),
                 .product(name: "Highlighter", package: "HighlighterSwift"),
+                .product(name: "Markdown", package: "swift-markdown"),
             ],
-            path: "Sources/CrierUI"
+            path: "Sources/CrierUI",
+            resources: [
+                // Same SVGs as scripts/build-app.zip → Crier.app (repo: assets/icons).
+                .copy("../../assets/icons"),
+            ]
         ),
         .executableTarget(
             name: "CrierEmit",

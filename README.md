@@ -236,7 +236,7 @@ const replyText = res.status === 200 ? await res.text() : null
 
 User opts in by adding `"@crier/opencode-plugin"` to `opencode.json`'s `plugin` array.
 
-If the panel shows **“No assistant message was read from the transcript”** for OpenCode, the plugin could not read text from `session.messages` (wrong workspace path, race right after `session.idle`, or the last turn only had tool/output parts). Rebuild/relink the plugin, then set `CRIER_OPENCODE_DEBUG=1` when starting OpenCode to log `session.messages` / `session.message` failures on stderr. Permission prompts use the permission **title** as `message` instead of transcript text.
+If the panel opens without assistant text for OpenCode, the plugin could not read text from `session.messages` (wrong workspace path, race right after `session.idle`, or the last turn only had tool/output parts). Rebuild/relink the plugin, then set `CRIER_OPENCODE_DEBUG=1` when starting OpenCode to log `session.messages` / `session.message` failures on stderr. Permission prompts use the permission **title** as `message` instead of transcript text.
 
 ### Empty-message tracing (`~/.claude/crier-empty-message.jsonl`)
 
@@ -246,7 +246,7 @@ For `turn_done`, `needs_permission`, and `needs_input`, if `message` is empty yo
 | --- | --- | --- |
 | `empty_assistant_extract` | `crier-emit` | Transcript/hook side; may include `transcript_tail_jsonl_lines` (last lines of the jsonl) and `stdin_json_keys`. |
 | `empty_message_event` | `crier-server` | The `POST /event` body summary (`payload_keys`, `session_id`, `request_id`, …). |
-| `empty_message_panel` | `crier-ui` | The overlay actually drew that event; `crier_ui_log` points at `~/.claude/crier-ui.log`. |
+| `empty_message_panel` | `crier-ui` | The overlay actually drew that event; `crier_ui_log` points at `~/Library/Application Support/Crier/crier-ui.log`. |
 
 Correlate rows by `ts`, `session_id`, and `request_id`.
 
