@@ -67,8 +67,53 @@ public enum CrierEmitCore {
     // session at once.
     public static let globalDisabledPath = "\(crierAgentDir)/disabled-global"
 
+    /// Temporary silence: hooks skip until this instant (wall clock, Unix time).
+    /// Menu bar "Pause for …" writes this file; `crier-emit` checks alongside global disable.
+    public static let globalPauseUntilPath = "\(crierAgentDir)/pause-until"
+
     public static func isGloballyDisabled() -> Bool {
         FileManager.default.fileExists(atPath: globalDisabledPath)
+    }
+
+    /// End time of an active pause, if any. When the stamp is in the past, the file is removed and this returns `nil`.
+    public static func globalPauseExpiry() -> Date? {
+        let p = globalPauseUntilPath
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: p)),
+              let s = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !s.isEmpty,
+              let unix = TimeInterval(s) else {
+            return nil
+        }
+        let end = Date(timeIntervalSince1970: unix)
+        if end <= Date() {
+            try? FileManager.default.removeItem(atPath: p)
+            return nil
+        }
+        return end
+    }
+
+    public static func isGlobalPauseActive() -> Bool {
+        globalPauseExpiry() != nil
+    }
+
+    public static func setGlobalPause(until end: Date) {
+        try? FileManager.default.createDirectory(
+            atPath: crierAgentDir,
+            withIntermediateDirectories: true
+        )
+        let unix = Int(floor(end.timeIntervalSince1970))
+        let data = "\(unix)\n".data(using: .utf8)
+        FileManager.default.createFile(atPath: globalPauseUntilPath, contents: data)
+    }
+
+    public static func clearGlobalPause() {
+        try? FileManager.default.removeItem(atPath: globalPauseUntilPath)
+    }
+
+    /// True when either the global disable flag or a menu-bar pause should short-circuit hooks.
+    public static func isGlobalSilenceActive() -> Bool {
+        isGloballyDisabled() || isGlobalPauseActive()
     }
 
     public static func isCwdDisabled(_ cwd: String) -> Bool {

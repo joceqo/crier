@@ -190,6 +190,44 @@ final class CrierEmitCoreTests: XCTestCase {
         XCTAssertFalse(CrierEmitCore.isGloballyDisabled())
     }
 
+    func testGlobalPauseActiveUntilFutureUnixStamp() throws {
+        let p = CrierEmitCore.globalPauseUntilPath
+        defer { try? FileManager.default.removeItem(atPath: p) }
+        let future = Int(Date().timeIntervalSince1970) + 3600
+        try FileManager.default.createDirectory(
+            atPath: CrierEmitCore.crierAgentDir,
+            withIntermediateDirectories: true
+        )
+        FileManager.default.createFile(atPath: p, contents: "\(future)\n".data(using: .utf8))
+        XCTAssertTrue(CrierEmitCore.isGlobalPauseActive())
+        XCTAssertTrue(CrierEmitCore.isGlobalSilenceActive())
+    }
+
+    func testGlobalPauseExpiredDeletesFlag() throws {
+        let p = CrierEmitCore.globalPauseUntilPath
+        defer { try? FileManager.default.removeItem(atPath: p) }
+        let past = Int(Date().timeIntervalSince1970) - 30
+        try FileManager.default.createDirectory(
+            atPath: CrierEmitCore.crierAgentDir,
+            withIntermediateDirectories: true
+        )
+        FileManager.default.createFile(atPath: p, contents: "\(past)\n".data(using: .utf8))
+        XCTAssertFalse(CrierEmitCore.isGlobalPauseActive())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: p))
+    }
+
+    func testGlobalSilenceWithoutPauseOrDisable() throws {
+        let g = CrierEmitCore.globalDisabledPath
+        let p = CrierEmitCore.globalPauseUntilPath
+        defer {
+            try? FileManager.default.removeItem(atPath: g)
+            try? FileManager.default.removeItem(atPath: p)
+        }
+        if FileManager.default.fileExists(atPath: g) { try? FileManager.default.removeItem(atPath: g) }
+        if FileManager.default.fileExists(atPath: p) { try? FileManager.default.removeItem(atPath: p) }
+        XCTAssertFalse(CrierEmitCore.isGlobalSilenceActive())
+    }
+
     // MARK: - Summary affordance gating
 
     func testSummaryThresholdConstantIs400() {

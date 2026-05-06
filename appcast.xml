@@ -6,6 +6,20 @@
     <description>Sparkle appcast for Crier.app automatic updates.</description>
     <language>en</language>
     <item>
+      <title>0.7.0</title>
+      <link>https://github.com/joceqo/crier/releases/tag/v0.7.0</link>
+      <sparkle:version>0.7.0</sparkle:version>
+      <sparkle:shortVersionString>0.7.0</sparkle:shortVersionString>
+      <description><![CDATA[
+        <ul>
+          <li><strong>Pause</strong> in the menu bar: silence hooks for <strong>10</strong> or <strong>30 minutes</strong>, or cancel anytime.</li>
+          <li>Works with global disable; <code>crier-emit</code> honors the same pause file when the UI is not running.</li>
+        </ul>
+      ]]></description>
+      <pubDate>Wed, 06 May 2026 15:00:00 +0000</pubDate>
+      <enclosure url="https://github.com/joceqo/crier/releases/download/v0.7.0/Crier.app.zip" length="4134895" type="application/octet-stream" sparkle:edSignature="VCG7FCq48dmGfEbxxtnlfRIk3ZieHMZ3MTXX5oh0gvR6Y7H4U+9Yz3XAYp7i+AyHf8gTEJ2iRU79RhuTLA3oCA==" sparkle:minimumSystemVersion="14.0" />
+    </item>
+    <item>
       <title>0.6.0</title>
       <link>https://github.com/joceqo/crier/releases/tag/v0.6.0</link>
       <sparkle:version>0.6.0</sparkle:version>

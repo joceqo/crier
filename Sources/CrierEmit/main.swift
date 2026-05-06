@@ -320,8 +320,8 @@ log("cwd=\(cwd) tmux_pane=\(env["TMUX_PANE"] ?? "-")")
 // this CWD (`/crier off` skill), or for this specific conversation (the
 // badge X dialog / Conversations window). All three skip the panel pop
 // and exit 0 so the hook chain unblocks normally.
-if CrierEmitCore.isGloballyDisabled() {
-    log("global disable flag present — skipping")
+if CrierEmitCore.isGlobalSilenceActive() {
+    log("global silence (disable or pause) — skipping")
     exit(0)
 }
 if isCwdDisabled(cwd) {

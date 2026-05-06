@@ -1001,10 +1001,8 @@ final class CrierBorderlessPanel: NSPanel {
 // in confirmDisableSession() / crier-emit but applies project-wide. When
 // present, every Stop hook short-circuits in crier-emit (post-update there)
 // and the panel never pops. The status item toggles this file.
-private let crierGlobalDisabledPath = "/tmp/crier-agent/disabled-global"
-
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let state = CrierState()
     /// Sparkle: background update checks + "Check for Updates…". Retain for menu target.
     private lazy var updaterController = SPUStandardUpdaterController(
@@ -1019,6 +1017,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var statusDisableItem: NSMenuItem?
     var conversationsWindow: NSWindow?
     var setupWindow: NSWindow?
+    /// Fires when a menu-bar pause expires (mirrors `pause-until` on disk for crier-emit).
+    private var pauseEndTimer: Timer?
+    private weak var statusPauseCancelItem: NSMenuItem?
+    private weak var statusMenu: NSMenu?
+
     // First show pins to screen bottom-right; subsequent shows keep
     // wherever the user dragged the panel. Resizes also avoid re-anchoring,
     // so a growing message doesn't snap the window back.
@@ -1070,6 +1073,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let menu = NSMenu()
+        menu.delegate = self
+        statusMenu = menu
 
         let setupItem = NSMenuItem(
             title: "Setup…",
@@ -1114,6 +1119,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusDisableItem = disableItem
         menu.addItem(disableItem)
 
+        let pauseItem = NSMenuItem(title: "Pause", action: nil, keyEquivalent: "")
+        let pauseSubmenu = NSMenu(title: "Pause")
+        let pause10 = NSMenuItem(
+            title: "10 minutes",
+            action: #selector(pauseFor10Minutes(_:)),
+            keyEquivalent: ""
+        )
+        pause10.target = self
+        pauseSubmenu.addItem(pause10)
+        let pause30 = NSMenuItem(
+            title: "30 minutes",
+            action: #selector(pauseFor30Minutes(_:)),
+            keyEquivalent: ""
+        )
+        pause30.target = self
+        pauseSubmenu.addItem(pause30)
+        pauseSubmenu.addItem(.separator())
+        let cancelPause = NSMenuItem(
+            title: "Cancel Pause",
+            action: #selector(cancelPause(_:)),
+            keyEquivalent: ""
+        )
+        cancelPause.target = self
+        pauseSubmenu.addItem(cancelPause)
+        statusPauseCancelItem = cancelPause
+        pauseItem.submenu = pauseSubmenu
+        menu.addItem(pauseItem)
+
         menu.addItem(.separator())
 
         let quitItem = NSMenuItem(
@@ -1126,25 +1159,102 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         item.menu = menu
         statusItem = item
-        refreshGlobalDisableState()
+        refreshStatusMenuState()
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        guard menu === statusMenu else { return }
+        refreshStatusMenuState()
+    }
+
+    /// Updates Disable checkmark and Pause affordances whenever the menu opens or silence state changes.
+    private func refreshStatusMenuState() {
+        let perm = FileManager.default.fileExists(atPath: CrierEmitCore.globalDisabledPath)
+        statusDisableItem?.title = perm ? "Enable Crier (Global)" : "Disable Crier (Global)"
+        statusDisableItem?.state = perm ? .on : .off
+
+        let pauseEnd = CrierEmitCore.globalPauseExpiry()
+        let pausing = pauseEnd != nil
+        statusPauseCancelItem?.isEnabled = pausing
+        if let end = pauseEnd {
+            let f = DateFormatter()
+            f.timeStyle = .short
+            f.dateStyle = .none
+            statusPauseCancelItem?.title = "Cancel Pause (until \(f.string(from: end)))"
+        } else {
+            statusPauseCancelItem?.title = "Cancel Pause"
+        }
+    }
+
+    private func schedulePauseEndTimer(until end: Date) {
+        pauseEndTimer?.invalidate()
+        let interval = end.timeIntervalSinceNow
+        guard interval > 0 else {
+            pauseDidExpire()
+            return
+        }
+        pauseEndTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in
+                self.pauseDidExpire()
+            }
+        }
+    }
+
+    private func pauseDidExpire() {
+        pauseEndTimer?.invalidate()
+        pauseEndTimer = nil
+        CrierEmitCore.clearGlobalPause()
+        uiLog("pause expired")
+        refreshStatusMenuState()
+    }
+
+    /// Begin or extend a menu-bar pause; hooks honor `pause-until` until `end`.
+    private func startPause(until end: Date) {
+        CrierEmitCore.setGlobalPause(until: end)
+        schedulePauseEndTimer(until: end)
+        uiLog("pause set until \(ISO8601DateFormatter().string(from: end))")
+        state.removeAllSessions()
+        hide()
+        refreshStatusMenuState()
+    }
+
+    @objc private func pauseFor10Minutes(_ sender: Any?) {
+        startPause(until: Date().addingTimeInterval(600))
+    }
+
+    @objc private func pauseFor30Minutes(_ sender: Any?) {
+        startPause(until: Date().addingTimeInterval(1800))
+    }
+
+    @objc private func cancelPause(_ sender: Any?) {
+        pauseEndTimer?.invalidate()
+        pauseEndTimer = nil
+        CrierEmitCore.clearGlobalPause()
+        uiLog("pause cancelled by user")
+        refreshStatusMenuState()
     }
 
     @objc private func toggleGlobalDisable(_ sender: Any?) {
         let fm = FileManager.default
-        if fm.fileExists(atPath: crierGlobalDisabledPath) {
-            try? fm.removeItem(atPath: crierGlobalDisabledPath)
+        let path = CrierEmitCore.globalDisabledPath
+        if fm.fileExists(atPath: path) {
+            try? fm.removeItem(atPath: path)
             uiLog("global disable cleared")
         } else {
+            pauseEndTimer?.invalidate()
+            pauseEndTimer = nil
+            CrierEmitCore.clearGlobalPause()
             try? fm.createDirectory(atPath: "/tmp/crier-agent",
                                      withIntermediateDirectories: true)
-            fm.createFile(atPath: crierGlobalDisabledPath, contents: nil)
+            fm.createFile(atPath: path, contents: nil)
             uiLog("global disable set")
             // Hide any currently-shown panel so the user sees the toggle take
             // effect immediately.
             state.removeAllSessions()
             hide()
         }
-        refreshGlobalDisableState()
+        refreshStatusMenuState()
     }
 
     @objc private func quitApp(_ sender: Any?) {
@@ -1239,12 +1349,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    private func refreshGlobalDisableState() {
-        let isDisabled = FileManager.default.fileExists(atPath: crierGlobalDisabledPath)
-        statusDisableItem?.title = isDisabled
-            ? "Enable Crier (Global)"
-            : "Disable Crier (Global)"
-        statusDisableItem?.state = isDisabled ? .on : .off
+    /// If `pause-until` was written before the last quit (or another tool set it), arm the expiry timer again.
+    private func resyncPauseTimerFromDisk() {
+        guard let end = CrierEmitCore.globalPauseExpiry() else { return }
+        schedulePauseEndTimer(until: end)
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -1252,6 +1360,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installMainMenu()
         _ = updaterController
         installStatusItem()
+        resyncPauseTimerFromDisk()
         let view = CrierPanelView(
             state: state,
             onSubmit: { [weak self] in self?.submit() },

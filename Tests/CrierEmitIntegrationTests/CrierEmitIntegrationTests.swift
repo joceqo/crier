@@ -564,4 +564,25 @@ final class CrierEmitIntegrationTests: XCTestCase {
         XCTAssertEqual(code, 0)
         XCTAssertTrue(stdout.isEmpty, "globally disabled: should produce no stdout")
     }
+
+    func testEmitRespectsPauseUntil() throws {
+        guard !Self.emitBinaryPath.isEmpty else { throw XCTSkip("crier-emit binary not built") }
+
+        let pausePath = CrierEmitCore.globalPauseUntilPath
+        let future = Int(Date().timeIntervalSince1970) + 3600
+        try FileManager.default.createDirectory(
+            atPath: "/tmp/crier-agent",
+            withIntermediateDirectories: true
+        )
+        FileManager.default.createFile(atPath: pausePath, contents: "\(future)\n".data(using: .utf8))
+        defer { try? FileManager.default.removeItem(atPath: pausePath) }
+
+        let (code, stdout, _) = runEmit(
+            agent: "claude-code",
+            event: "turn_done",
+            stdinPayload: ["cwd": "/tmp", "session_id": "pause-test"]
+        )
+        XCTAssertEqual(code, 0)
+        XCTAssertTrue(stdout.isEmpty, "pause: should produce no stdout")
+    }
 }
