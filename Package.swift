@@ -27,6 +27,7 @@ let package = Package(
         // NSAttributedString output, current highlight.js 11.x grammars.
         // Used for non-Swift code blocks where Splash can't help.
         .package(url: "https://github.com/smittytone/HighlighterSwift.git", from: "1.1.5"),
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.0"),
     ],
     targets: [
         .target(
@@ -53,6 +54,7 @@ let package = Package(
             dependencies: [
                 "CrierEmitCore",
                 "CrierServer",
+                .product(name: "Sparkle", package: "Sparkle"),
                 .product(name: "MarkdownToAttributedString", package: "MarkdownToAttributedString"),
                 .product(name: "Splash", package: "Splash"),
                 .product(name: "Highlighter", package: "HighlighterSwift"),
@@ -62,6 +64,12 @@ let package = Package(
             resources: [
                 // Same SVGs as scripts/build-app.zip → Crier.app (repo: assets/icons).
                 .copy("../../assets/icons"),
+            ],
+            linkerSettings: [
+                .unsafeFlags(
+                    ["-Xlinker", "-rpath", "-Xlinker", "@loader_path/../Frameworks"],
+                    .when(platforms: [.macOS])
+                ),
             ]
         ),
         .executableTarget(

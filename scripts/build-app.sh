@@ -34,10 +34,27 @@ EMIT_BIN="$REPO_DIR/.build/release/crier-emit"
 test -x "$BIN"      || { echo "build did not produce $BIN" >&2; exit 1; }
 test -x "$EMIT_BIN" || { echo "build did not produce $EMIT_BIN" >&2; exit 1; }
 
+# Sparkle (auto-update): SwiftPM places Sparkle.framework next to the arch-specific release build.
+SPARKLE_FW=""
+for cand in \
+  "$REPO_DIR/.build/arm64-apple-macosx/release/Sparkle.framework" \
+  "$REPO_DIR/.build/x86_64-apple-macosx/release/Sparkle.framework" \
+  "$REPO_DIR/.build/release/Sparkle.framework"; do
+  if [ -d "$cand" ]; then SPARKLE_FW="$cand"; break; fi
+done
+if [ -z "$SPARKLE_FW" ]; then
+  SPARKLE_FW="$(/usr/bin/find "$REPO_DIR/.build" -path '*/release/Sparkle.framework' -type d 2>/dev/null | /usr/bin/grep -v '.xcframework' | /usr/bin/head -1)"
+fi
+test -n "$SPARKLE_FW" && test -d "$SPARKLE_FW" || {
+  echo "Sparkle.framework not found after swift build (CrierUI must link Sparkle)" >&2
+  exit 1
+}
+
 echo "==> Assembling $APP"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Resources/bin"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources" "$APP/Contents/Resources/bin"
 cp "$BIN" "$APP/Contents/MacOS/Crier"
+/bin/cp -R "$SPARKLE_FW" "$APP/Contents/Frameworks/"
 # crier-emit lives inside the bundle so hook configs can reference it by an
 # absolute, stable path: /Applications/Crier.app/Contents/Resources/bin/crier-emit.
 # No /usr/local/bin pollution, no sudo at install time.
@@ -75,7 +92,22 @@ if [ -n "$UIBUNDLE" ]; then
     echo "==> Copied $(/usr/bin/basename "$UIBUNDLE") for Bundle.module"
 fi
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+# Ed25519 public key for Sparkle (private key in maintainer Keychain). Env overrides; else optional
+# scripts/sparkle-public-ed.b64; else published default matching official release signing.
+SPARKLE_PUBLIC_ED_KEY="${SPARKLE_PUBLIC_ED_KEY:-}"
+if [ -z "$SPARKLE_PUBLIC_ED_KEY" ] && [ -f "$SCRIPT_DIR/sparkle-public-ed.b64" ]; then
+    SPARKLE_PUBLIC_ED_KEY="$(/usr/bin/tr -d ' \n\r\t' < "$SCRIPT_DIR/sparkle-public-ed.b64")"
+fi
+if [ -z "$SPARKLE_PUBLIC_ED_KEY" ]; then
+    SPARKLE_PUBLIC_ED_KEY="C8BN94xZ6znNxGt0axnkOKLsOx9mYz+iXuqU3VavNoc="
+fi
+SPARKLE_KEY_XML=""
+if [ -n "$SPARKLE_PUBLIC_ED_KEY" ]; then
+    SPARKLE_KEY_XML="  <key>SUPublicEDKey</key>
+  <string>${SPARKLE_PUBLIC_ED_KEY}</string>"
+fi
+
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -86,11 +118,16 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleExecutable</key>          <string>Crier</string>
   <key>CFBundleIconFile</key>            <string>AppIcon</string>
   <key>CFBundlePackageType</key>         <string>APPL</string>
-  <key>CFBundleVersion</key>             <string>0.5.0</string>
-  <key>CFBundleShortVersionString</key>  <string>0.5.0</string>
+  <key>CFBundleVersion</key>             <string>0.6.0</string>
+  <key>CFBundleShortVersionString</key>  <string>0.6.0</string>
   <key>LSMinimumSystemVersion</key>      <string>14.0</string>
   <key>LSUIElement</key>                 <true/>
   <key>NSHumanReadableCopyright</key>    <string>Crier — local agent overlay</string>
+  <key>SUFeedURL</key>
+  <string>https://raw.githubusercontent.com/joceqo/crier/main/appcast.xml</string>
+  <key>SUEnableAutomaticChecks</key>
+  <true/>
+${SPARKLE_KEY_XML}
 </dict>
 </plist>
 PLIST
@@ -118,6 +155,9 @@ NOTARY_PROFILE="${NOTARY_PROFILE:-crier-notary}"
 
 if [ "$RELEASE" -eq 1 ]; then
     echo "==> Signing with Developer ID ($DEVELOPER_ID)"
+    # Sparkle.framework first (nested helpers + XPC).
+    codesign --force --deep --options runtime --timestamp \
+        --sign "$DEVELOPER_ID" "$APP/Contents/Frameworks/Sparkle.framework"
     # Sign nested executables FIRST so they get the hardened runtime + secure
     # timestamp individually. `--deep` on the outer bundle alone doesn't apply
     # those flags to inner binaries; notarization rejects the result with
@@ -183,6 +223,7 @@ if [ "$RELEASE" -eq 1 ]; then
     fi
 else
     echo "==> Ad-hoc signing (use --release for Developer ID + notarization)"
+    codesign --force --deep --sign - "$APP/Contents/Frameworks/Sparkle.framework"
     codesign --force --deep --sign - "$APP"
 
     echo

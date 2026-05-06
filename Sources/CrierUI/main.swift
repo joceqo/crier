@@ -4,6 +4,7 @@ import CoreGraphics
 import CrierEmitCore
 import CrierServer
 import MarkdownToAttributedString
+import Sparkle
 import SwiftUI
 
 // crier-ui — floating overlay panel.
@@ -1005,6 +1006,12 @@ private let crierGlobalDisabledPath = "/tmp/crier-agent/disabled-global"
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let state = CrierState()
+    /// Sparkle: background update checks + "Check for Updates…". Retain for menu target.
+    private lazy var updaterController = SPUStandardUpdaterController(
+        startingUpdater: true,
+        updaterDelegate: nil,
+        userDriverDelegate: nil
+    )
     var panel: NSPanel!
     var subscriberTask: Task<Void, Never>?
     var lastTerminalApp: NSRunningApplication?
@@ -1087,6 +1094,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         feedbackItem.target = self
         menu.addItem(feedbackItem)
+
+        let checkUpdatesItem = NSMenuItem(
+            title: "Check for Updates…",
+            action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
+            keyEquivalent: ""
+        )
+        checkUpdatesItem.target = updaterController
+        menu.addItem(checkUpdatesItem)
 
         menu.addItem(.separator())
 
@@ -1235,6 +1250,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         uiLog("applicationDidFinishLaunching — endpoint=\(endpoint)")
         installMainMenu()
+        _ = updaterController
         installStatusItem()
         let view = CrierPanelView(
             state: state,

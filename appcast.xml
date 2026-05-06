@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Crier</title>
+    <link>https://github.com/joceqo/crier/releases</link>
+    <description>Sparkle appcast for Crier.app automatic updates.</description>
+    <language>en</language>
+    <item>
+      <title>0.6.0</title>
+      <link>https://github.com/joceqo/crier/releases/tag/v0.6.0</link>
+      <sparkle:version>0.6.0</sparkle:version>
+      <sparkle:shortVersionString>0.6.0</sparkle:shortVersionString>
+      <description><![CDATA[
+        <ul>
+          <li>Sparkle automatic updates with a <strong>Check for Updates…</strong> item in the menu bar.</li>
+          <li><strong>SUFeedURL</strong> points at this appcast; installs use the signed <code>Crier.app.zip</code> from GitHub Releases.</li>
+        </ul>
+      ]]></description>
+      <pubDate>Wed, 06 May 2026 12:00:00 +0000</pubDate>
+      <enclosure url="https://github.com/joceqo/crier/releases/download/v0.6.0/Crier.app.zip" length="4125191" type="application/octet-stream" sparkle:edSignature="Nig1x/U2sYHmhF0UFba8v6MBbEKM7wx158gZ8Yg4LR8a4qrbeS7biI4W7+XJj2DsG938tPZdQdB00UgOcAscBg==" sparkle:minimumSystemVersion="14.0" />
+    </item>
+  </channel>
+</rss>
