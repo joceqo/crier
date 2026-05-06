@@ -6,6 +6,20 @@
     <description>Sparkle appcast for Crier.app automatic updates.</description>
     <language>en</language>
     <item>
+      <title>0.7.1</title>
+      <link>https://github.com/joceqo/crier/releases/tag/v0.7.1</link>
+      <sparkle:version>0.7.1</sparkle:version>
+      <sparkle:shortVersionString>0.7.1</sparkle:shortVersionString>
+      <description><![CDATA[
+        <ul>
+          <li>Hook installer no longer writes <strong>App Translocation</strong> paths — Cursor/Claude/Codex configs keep working after Crier quits.</li>
+          <li>If you launched Crier only from Downloads/DMG, Setup now asks you to drag the app into <strong>Applications</strong> before wiring hooks.</li>
+        </ul>
+      ]]></description>
+      <pubDate>Wed, 06 May 2026 21:35:00 +0000</pubDate>
+      <enclosure url="https://github.com/joceqo/crier/releases/download/v0.7.1/Crier.app.zip" length="4137812" type="application/octet-stream" sparkle:edSignature="R/xQpjJFf4S+sETGaCIgOen1ze0z0nehTZ3wGseYSR8UCVHVT0BeXaneFny7aEGh0a8imYC6boTsVLJzUSL5Aw==" sparkle:minimumSystemVersion="14.0" />
+    </item>
+    <item>
       <title>0.7.0</title>
       <link>https://github.com/joceqo/crier/releases/tag/v0.7.0</link>
       <sparkle:version>0.7.0</sparkle:version>

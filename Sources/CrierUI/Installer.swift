@@ -4,8 +4,14 @@ import Foundation
 //
 // Bundled crier-emit lives at:
 //   /Applications/Crier.app/Contents/Resources/bin/crier-emit
-// (or wherever the user moved Crier.app — Bundle.main.resourceURL gives us
-// the live path, so config files always point at the current app location).
+// (or wherever the user placed Crier.app). We resolve the path written into
+// hook configs via `emitBinaryURL()`.
+//
+// macOS App Translocation: launching Crier from a quarantined download/DMG can
+// place the bundle under /var/.../AppTranslocation/... — that directory is not
+// a stable anchor for hooks; it disappears after quit. When translocated, we
+// only embed a hook path after `/Applications/Crier.app` matches this bundle ID;
+// otherwise install fails with guidance to drag Crier into Applications first.
 //
 // Each agent gets its own install function. They all:
 //   1. Backup the existing config (timestamped .bak file).
@@ -37,11 +43,40 @@ enum Installer {
     // MARK: - Detection
 
     static func emitBinaryURL() -> URL? {
-        Bundle.main.resourceURL?.appendingPathComponent("bin/crier-emit")
+        guard let resource = Bundle.main.resourceURL else { return nil }
+        let bundled = resource.appendingPathComponent("bin/crier-emit")
+        guard FileManager.default.isExecutableFile(atPath: bundled.path) else { return nil }
+
+        // Never write translocated paths into agent configs — hooks would break
+        // whenever Crier is not running (path no longer exists).
+        if Self.isRunningFromAppTranslocation {
+            let appsBundle = URL(fileURLWithPath: "/Applications/Crier.app", isDirectory: true)
+            let appsEmit = appsBundle.appendingPathComponent("Contents/Resources/bin/crier-emit")
+            guard FileManager.default.isExecutableFile(atPath: appsEmit.path),
+                  Self.bundleAtAppsMatchesRunningApp(appsBundle) else {
+                return nil
+            }
+            return appsEmit
+        }
+        return bundled
     }
 
     static func emitBinaryPath() -> String {
         emitBinaryURL()?.path ?? ""
+    }
+
+    private static var isRunningFromAppTranslocation: Bool {
+        Bundle.main.bundlePath.contains("AppTranslocation")
+    }
+
+    /// True when `/Applications/Crier.app` exists and matches this process's bundle identifier.
+    private static func bundleAtAppsMatchesRunningApp(_ appURL: URL) -> Bool {
+        guard let installed = Bundle(url: appURL),
+              let installedID = installed.bundleIdentifier,
+              let runningID = Bundle.main.bundleIdentifier else {
+            return false
+        }
+        return installedID == runningID
     }
 
     static func status(_ agent: Agent) -> InstallStatus {
@@ -103,14 +138,16 @@ enum Installer {
             .compactMap { $0["command"] as? String }
         let crierCommands = allCommands.filter { $0.contains("crier-emit") }
         guard !crierCommands.isEmpty else { return .detectedNotWired }
-        return crierCommands.allSatisfy { $0.hasPrefix(emitBinaryPath()) }
+        let emit = emitBinaryPath()
+        guard !emit.isEmpty else { return .wiredOtherPath }
+        return crierCommands.allSatisfy { $0.hasPrefix(emit) }
             ? .wired
             : .wiredOtherPath
     }
 
     private static func installClaudeCode() throws {
         let emit = emitBinaryPath()
-        guard !emit.isEmpty else { throw InstallerError.bundledBinaryMissing }
+        try Self.ensureEmitPathForInstall(emit)
 
         let url = claudeSettingsURL
         try FileManager.default.createDirectory(
@@ -235,14 +272,16 @@ enum Installer {
             .compactMap { $0["command"] as? String }
         let crierCommands = commands.filter { $0.contains("crier-emit") }
         guard !crierCommands.isEmpty else { return .detectedNotWired }
-        return crierCommands.allSatisfy { $0.hasPrefix(emitBinaryPath()) }
+        let emit = emitBinaryPath()
+        guard !emit.isEmpty else { return .wiredOtherPath }
+        return crierCommands.allSatisfy { $0.hasPrefix(emit) }
             ? .wired
             : .wiredOtherPath
     }
 
     private static func installCursor() throws {
         let emit = emitBinaryPath()
-        guard !emit.isEmpty else { throw InstallerError.bundledBinaryMissing }
+        try Self.ensureEmitPathForInstall(emit)
 
         let url = cursorHooksURL
         try FileManager.default.createDirectory(
@@ -303,12 +342,14 @@ enum Installer {
             return .detectedNotWired
         }
         guard raw.contains("crier-emit") else { return .detectedNotWired }
-        return raw.contains(emitBinaryPath()) ? .wired : .wiredOtherPath
+        let emit = emitBinaryPath()
+        guard !emit.isEmpty else { return .wiredOtherPath }
+        return raw.contains(emit) ? .wired : .wiredOtherPath
     }
 
     private static func installCodex() throws {
         let emit = emitBinaryPath()
-        guard !emit.isEmpty else { throw InstallerError.bundledBinaryMissing }
+        try Self.ensureEmitPathForInstall(emit)
 
         let url = codexConfigURL
         try FileManager.default.createDirectory(
@@ -380,14 +421,29 @@ enum Installer {
 
     // MARK: - Helpers
 
+    private static func ensureEmitPathForInstall(_ emit: String) throws {
+        guard !emit.isEmpty else {
+            if isRunningFromAppTranslocation {
+                throw InstallerError.copyToApplicationsBeforeHooks
+            }
+            throw InstallerError.bundledBinaryMissing
+        }
+    }
+
     enum InstallerError: Error, LocalizedError {
         case bundledBinaryMissing
+        /// Translocated app has no stable path for hook configs.
+        case copyToApplicationsBeforeHooks
 
         var errorDescription: String? {
             switch self {
             case .bundledBinaryMissing:
                 return "Crier.app is missing its bundled crier-emit binary. " +
                        "Try downloading the release again."
+            case .copyToApplicationsBeforeHooks:
+                return "Crier is running from a temporary download location (App Translocation). " +
+                       "Drag Crier.app into your Applications folder, open it from there, " +
+                       "then run Install again so hooks point at a path that stays on disk."
             }
         }
     }

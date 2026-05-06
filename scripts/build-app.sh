@@ -118,8 +118,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key>          <string>Crier</string>
   <key>CFBundleIconFile</key>            <string>AppIcon</string>
   <key>CFBundlePackageType</key>         <string>APPL</string>
-  <key>CFBundleVersion</key>             <string>0.7.0</string>
-  <key>CFBundleShortVersionString</key>  <string>0.7.0</string>
+  <key>CFBundleVersion</key>             <string>0.7.1</string>
+  <key>CFBundleShortVersionString</key>  <string>0.7.1</string>
   <key>LSMinimumSystemVersion</key>      <string>14.0</string>
   <key>LSUIElement</key>                 <true/>
   <key>NSHumanReadableCopyright</key>    <string>Crier — local agent overlay</string>
@@ -220,6 +220,21 @@ if [ "$RELEASE" -eq 1 ]; then
     echo "  $ZIP   ← upload this to GitHub Releases"
     if [ "$MAKE_DMG" -eq 1 ]; then
         echo "  $DMG   ← also upload"
+    fi
+    SIGN_UPDATE=""
+    for su in \
+      "$REPO_DIR/.build/artifacts/sparkle/Sparkle/bin/sign_update" \
+      "$REPO_DIR/.build/checkouts/Sparkle/bin/sign_update"; do
+      if [ -x "$su" ]; then SIGN_UPDATE="$su"; break; fi
+    done
+    if [ -n "$SIGN_UPDATE" ]; then
+        echo ""
+        echo "Sparkle (paste length + sparkle:edSignature into appcast <enclosure> for this zip):"
+        echo -n "  length="
+        stat -f%z "$ZIP"
+        echo -n "  sparkle:edSignature=\""
+        "$SIGN_UPDATE" -p "$ZIP" | tr -d '\n'
+        echo "\""
     fi
 else
     echo "==> Ad-hoc signing (use --release for Developer ID + notarization)"
