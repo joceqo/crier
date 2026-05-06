@@ -1002,7 +1002,7 @@ final class CrierBorderlessPanel: NSPanel {
 // present, every Stop hook short-circuits in crier-emit (post-update there)
 // and the panel never pops. The status item toggles this file.
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
     let state = CrierState()
     /// Sparkle: background update checks + "Check for Updates…". Retain for menu target.
     private lazy var updaterController = SPUStandardUpdaterController(
@@ -1022,10 +1022,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private weak var statusPauseCancelItem: NSMenuItem?
     private weak var statusMenu: NSMenu?
 
-    // First show pins to screen bottom-right; subsequent shows keep
-    // wherever the user dragged the panel. Resizes also avoid re-anchoring,
-    // so a growing message doesn't snap the window back.
-    var hasPositionedPanel = false
+    // When false, each `showPanel()` recenters on the screen under the mouse
+    // (fallback: main display) so a new turn lands predictably. After the user
+    // drags the panel once, we keep their placement until the next app launch.
+    var userPositionedPanel = false
+    /// Skips `windowDidMove` while we adjust geometry programmatically.
+    private var programmaticPanelGeometry = false
 
     // Install a minimal main menu — `.accessory` apps don't get one by default,
     // and without an Edit menu macOS doesn't route Cmd+C/V/X/A through the
@@ -1389,6 +1391,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.isReleasedWhenClosed = false
         // Don't clip the content view — each card already self-clips with
         // rounded corners and we need shadow overflow to render.
+        panel.delegate = self
 
         // Start the embedded daemon. If a standalone `crier-daemon` is
         // already serving the port, this silently no-ops and the UI just
@@ -1437,12 +1440,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return true
     }
 
-    func positionBottomRight() {
-        guard let screen = NSScreen.main else { return }
-        let visible = screen.visibleFrame
+    private func screenForPanelPlacement() -> NSScreen? {
+        let mouse = NSEvent.mouseLocation
+        for s in NSScreen.screens where s.frame.contains(mouse) {
+            return s
+        }
+        return NSScreen.main
+    }
+
+    /// Places the floating panel in the center of the chosen screen’s visible frame.
+    func positionPanelCentered() {
+        guard let screen = screenForPanelPlacement() else { return }
+        programmaticPanelGeometry = true
+        defer { programmaticPanelGeometry = false }
+        let vf = screen.visibleFrame
         let size = panel.frame.size
-        let origin = NSPoint(x: visible.maxX - size.width - 24, y: visible.minY + 24)
-        panel.setFrameOrigin(origin)
+        let x = vf.midX - size.width / 2
+        let y = vf.midY - size.height / 2
+        panel.setFrameOrigin(NSPoint(x: x, y: y))
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        guard notification.object as? NSWindow === panel else { return }
+        guard !programmaticPanelGeometry else { return }
+        userPositionedPanel = true
     }
 
     // Resize the panel to match SwiftUI's reported ideal size. Width stays
@@ -1461,13 +1482,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         uiLog("applyContentSize — reported=\(size) current=\(currentContent) → resizing to \(newSize)")
+        programmaticPanelGeometry = true
+        defer { programmaticPanelGeometry = false }
         panel.setContentSize(newSize)
     }
 
     func showPanel() {
-        if !hasPositionedPanel {
-            positionBottomRight()
-            hasPositionedPanel = true
+        if !userPositionedPanel {
+            positionPanelCentered()
         }
         panel.orderFrontRegardless()
         panel.makeKey()
