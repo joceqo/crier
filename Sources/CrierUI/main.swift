@@ -20,6 +20,35 @@ import SwiftUI
 
 private let endpoint = ProcessInfo.processInfo.environment["CRIER_ENDPOINT"] ?? "http://127.0.0.1:8731"
 
+/// When set (env `CRIER_FEEDBACK_EMAIL` or Info.plist `CrierFeedbackEmail`), **Send Feedback…**
+/// opens the user’s mail composer instead of a browser. Ship a support address in the app
+/// bundle for releases; omit both to fall back to clipboard + alert.
+private func configuredFeedbackEmail() -> String? {
+    if let e = ProcessInfo.processInfo.environment["CRIER_FEEDBACK_EMAIL"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+       !e.isEmpty { return e }
+    if let e = Bundle.main.object(forInfoDictionaryKey: "CrierFeedbackEmail") as? String {
+        let t = e.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !t.isEmpty { return t }
+    }
+    return nil
+}
+
+private func feedbackDiagnosticsBody() -> String {
+    let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+    let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
+    let os = ProcessInfo.processInfo.operatingSystemVersionString
+    let logPath = uiLogFilePath()
+    return """
+    (Describe what happened or what you’d like — thanks.)
+
+    —
+    Crier: \(version) (\(build))
+    macOS: \(os)
+    UI log: \(logPath)
+
+    """
+}
+
 private func uiLogFilePath() -> String {
     let fm = FileManager.default
     guard let dir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
@@ -1051,6 +1080,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         conversationsItem.target = self
         menu.addItem(conversationsItem)
 
+        let feedbackItem = NSMenuItem(
+            title: "Send Feedback…",
+            action: #selector(openFeedback(_:)),
+            keyEquivalent: ""
+        )
+        feedbackItem.target = self
+        menu.addItem(feedbackItem)
+
         menu.addItem(.separator())
 
         let disableItem = NSMenuItem(
@@ -1097,6 +1134,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func quitApp(_ sender: Any?) {
         NSApp.terminate(nil)
+    }
+
+    /// Native feedback: mail composer when `CrierFeedbackEmail` / `CRIER_FEEDBACK_EMAIL`
+    /// is set; otherwise copies diagnostics and shows an alert (no browser).
+    @objc private func openFeedback(_ sender: Any?) {
+        let body = feedbackDiagnosticsBody()
+        NSApp.activate(ignoringOtherApps: true)
+
+        if let to = configuredFeedbackEmail() {
+            if let mail = NSSharingService(named: .composeEmail), mail.canPerform(withItems: [body]) {
+                mail.recipients = [to]
+                mail.subject = "Crier feedback"
+                mail.perform(withItems: [body])
+                return
+            }
+            var c = URLComponents()
+            c.scheme = "mailto"
+            c.path = to
+            c.queryItems = [
+                URLQueryItem(name: "subject", value: "Crier feedback"),
+                URLQueryItem(name: "body", value: body),
+            ]
+            if let url = c.url { NSWorkspace.shared.open(url) }
+            return
+        }
+
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(body, forType: .string)
+
+        let alert = NSAlert()
+        alert.messageText = "Feedback"
+        alert.informativeText =
+            "Diagnostics were copied to the Clipboard. Paste them into an email or message to the maintainer.\n\n" +
+            "Maintainers: set the CrierFeedbackEmail key in the app Info.plist (or CRIER_FEEDBACK_EMAIL for dev) so this menu opens Mail instead."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     // Lazily create a single Conversations window. Subsequent menu clicks
