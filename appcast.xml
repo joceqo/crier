@@ -6,6 +6,20 @@
     <description>Sparkle appcast for Crier.app automatic updates.</description>
     <language>en</language>
     <item>
+      <title>0.8.7</title>
+      <link>https://github.com/joceqo/crier/releases/tag/v0.8.7</link>
+      <sparkle:version>0.8.7</sparkle:version>
+      <sparkle:shortVersionString>0.8.7</sparkle:shortVersionString>
+      <description><![CDATA[
+        <ul>
+          <li><strong>Drag works from anywhere on the chip body.</strong> Previous build had <code>WindowDragRegion</code> as a <code>.background</code> of the icon+text section; SwiftUI's hit-testing was claiming the clicks before they fell through to the AppKit drag view, so drag only fired on padding gaps. Moved the drag region to an <code>.overlay</code> (in front of the visible content) so every mouseDown on the chip body lands on it directly. Click without movement still selects the tab; only the <code>⋮</code> kebab is exempt.</li>
+          <li><strong>Clearer mute wording.</strong> Kebab labels now read "Mute session for 10 mins" / "Mute session for 30 mins" (was "Mute 10 min" / "Mute 30 min") so the per-session scope is unambiguous.</li>
+        </ul>
+      ]]></description>
+      <pubDate>Fri, 08 May 2026 15:30:00 +0000</pubDate>
+      <enclosure url="https://github.com/joceqo/crier/releases/download/v0.8.7/Crier.app.zip" length="4171260" type="application/octet-stream" sparkle:edSignature="BaXJcpDtIiH0VPHtmhm+48lI94ShwmHy36RCSKspJ7giPTEzPGM8SolTMU5O6ogJYCeZyKRj/afwtEfEYoE+Bw==" sparkle:minimumSystemVersion="14.0" />
+    </item>
+    <item>
       <title>0.8.6</title>
       <link>https://github.com/joceqo/crier/releases/tag/v0.8.6</link>
       <sparkle:version>0.8.6</sparkle:version>
