@@ -6,6 +6,19 @@
     <description>Sparkle appcast for Crier.app automatic updates.</description>
     <language>en</language>
     <item>
+      <title>0.8.4</title>
+      <link>https://github.com/joceqo/crier/releases/tag/v0.8.4</link>
+      <sparkle:version>0.8.4</sparkle:version>
+      <sparkle:shortVersionString>0.8.4</sparkle:shortVersionString>
+      <description><![CDATA[
+        <ul>
+          <li><strong>Panel actually re-centers when content grows.</strong> 0.8.2's centering fix only ran inside <code>applyContentSize</code>, but the panel resizes most of the time via NSHostingView's intrinsic-size pipeline (which doesn't go through that path), so the recenter never fired. Moved the recenter into <code>windowDidResize</code> on the panel delegate — covers every resize regardless of which code path triggered it.</li>
+        </ul>
+      ]]></description>
+      <pubDate>Fri, 08 May 2026 10:25:00 +0000</pubDate>
+      <enclosure url="https://github.com/joceqo/crier/releases/download/v0.8.4/Crier.app.zip" length="4169360" type="application/octet-stream" sparkle:edSignature="l9OFHQaMXkP2YF6+4oksas36iNgyGF93PR3uN+DDemCZWUk1ctve78ZHftjZGOwJKejM/DK5pNHj0ttxvnZVDQ==" sparkle:minimumSystemVersion="14.0" />
+    </item>
+    <item>
       <title>0.8.3</title>
       <link>https://github.com/joceqo/crier/releases/tag/v0.8.3</link>
       <sparkle:version>0.8.3</sparkle:version>

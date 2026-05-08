@@ -1554,6 +1554,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         userPositionedPanel = true
     }
 
+    /// AppKit fires this whenever the panel's height changes — including
+    /// the SwiftUI-driven "intrinsic content size pushed up through
+    /// NSHostingView" resize that doesn't go through our `applyContentSize`
+    /// path (so re-centering there alone misses real-world resizes). The
+    /// `programmaticPanelGeometry` guard prevents the `setFrameOrigin`
+    /// inside `positionPanelCentered` from re-triggering itself; it
+    /// doesn't anyway (origin moves don't fire windowDidResize), but the
+    /// guard documents the invariant and is cheap.
+    func windowDidResize(_ notification: Notification) {
+        guard notification.object as? NSWindow === panel else { return }
+        guard !programmaticPanelGeometry else { return }
+        guard !userPositionedPanel else { return }
+        positionPanelCentered()
+    }
+
     // Resize the panel to match SwiftUI's reported ideal size. Width stays
     // pinned at 640 (the SwiftUI root sets it explicitly); height tracks
     // content but is clamped so a runaway message can't fill the screen.
