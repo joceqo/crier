@@ -879,9 +879,17 @@ private struct SessionTab: View {
         HStack(spacing: 0) {
             // Drag-or-tap region for the whole chip body (icon +
             // label + their padding). Tap with no movement → select
-            // session; drag → move the panel. Replaces the previous
-            // Button(label) which absorbed mouseDown immediately and
-            // made the chip undraggable.
+            // session; drag → move the panel.
+            //
+            // The drag region is an `.overlay` (in front), not
+            // `.background` (behind). Earlier iterations had it
+            // behind, which made text/icon "swallow" clicks somehow
+            // — `.contentShape(Rectangle())` plus SwiftUI's gesture
+            // system was claiming the hits before they fell through
+            // to the AppKit WindowDragChromeView. Putting the NSView
+            // on top means every mouseDown in this area hits it
+            // first; the icon/text are just visible underneath
+            // (no-op for hit testing).
             HStack(spacing: 6) {
                 AgentBrandIconView(agent: sess.agentName)
                     .frame(width: 14, height: 14)
@@ -893,8 +901,7 @@ private struct SessionTab: View {
             .padding(.leading, 10)
             .padding(.vertical, 5)
             .padding(.trailing, 4)
-            .contentShape(Rectangle())
-            .background(WindowDragRegion(onTap: {
+            .overlay(WindowDragRegion(onTap: {
                 state.selectSession(id: sess.id)
             }))
 
@@ -933,12 +940,12 @@ private struct SessionTab: View {
                 Button {
                     onMute(sess, 10)
                 } label: {
-                    Label("Mute 10 min", systemImage: "moon.zzz")
+                    Label("Mute session for 10 mins", systemImage: "moon.zzz")
                 }
                 Button {
                     onMute(sess, 30)
                 } label: {
-                    Label("Mute 30 min", systemImage: "moon.zzz")
+                    Label("Mute session for 30 mins", systemImage: "moon.zzz")
                 }
             } label: {
                 // Unicode VERTICAL ELLIPSIS (U+22EE). Earlier we used
