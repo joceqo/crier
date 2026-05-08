@@ -6,6 +6,19 @@
     <description>Sparkle appcast for Crier.app automatic updates.</description>
     <language>en</language>
     <item>
+      <title>0.8.3</title>
+      <link>https://github.com/joceqo/crier/releases/tag/v0.8.3</link>
+      <sparkle:version>0.8.3</sparkle:version>
+      <sparkle:shortVersionString>0.8.3</sparkle:shortVersionString>
+      <description><![CDATA[
+        <ul>
+          <li><strong>Fix OpenCode "Install Selected" appending duplicates.</strong> 0.8.2's Crier-entry filter was case-sensitive on "crier", so paths like <code>/Applications/Crier.app/Contents/Resources/agent-assets/opencode-plugin/dist/index.js</code> (capital C) weren't recognized as ours and each click added another copy. Match is case-insensitive now, AND non-Crier entries are de-duplicated as a side effect — one click on 0.8.3 cleans up an opencode.json that's accumulated 0.8.2 duplicates.</li>
+        </ul>
+      ]]></description>
+      <pubDate>Fri, 08 May 2026 10:00:00 +0000</pubDate>
+      <enclosure url="https://github.com/joceqo/crier/releases/download/v0.8.3/Crier.app.zip" length="4169407" type="application/octet-stream" sparkle:edSignature="gqXzD03L0PDl+vapAFN1AJOWoIjCTnugwquaJUDC853+3FnEXuqYc2aeKHa9/ytWwJK6n/pwa849G9XnkIsyDQ==" sparkle:minimumSystemVersion="14.0" />
+    </item>
+    <item>
       <title>0.8.2</title>
       <link>https://github.com/joceqo/crier/releases/tag/v0.8.2</link>
       <sparkle:version>0.8.2</sparkle:version>

@@ -461,6 +461,20 @@ enum Installer {
         opencodePluginEntryURL()?.path ?? ""
     }
 
+    /// True when `entry` is one of "our" plugin entries — ours-or-stale
+    /// Crier paths plus the legacy npm package name. Used by both status
+    /// detection and install to filter the same way. Case-insensitive
+    /// because real-world paths are `/Applications/Crier.app/...` while
+    /// the npm name is `@crier/opencode-plugin` — earlier `.contains("crier")`
+    /// missed the capital-C "Crier.app" form, which is why repeated
+    /// Install Selected clicks accumulated 15 duplicate entries instead
+    /// of replacing the prior one.
+    private static func isCrierOpenCodePluginEntry(_ entry: String) -> Bool {
+        if entry == "@crier/opencode-plugin" { return true }
+        guard entry.hasSuffix("opencode-plugin/dist/index.js") else { return false }
+        return entry.lowercased().contains("crier")
+    }
+
     private static func statusOpenCode() -> InstallStatus {
         // Hide the row entirely when this Crier build doesn't ship the
         // plugin (e.g. ad-hoc dev build with `node` missing). The user
@@ -476,9 +490,7 @@ enum Installer {
             return .detectedNotWired
         }
         let pluginEntries = (json["plugin"] as? [String]) ?? []
-        let crierEntries = pluginEntries.filter {
-            $0.contains("crier") && $0.hasSuffix("opencode-plugin/dist/index.js")
-        }
+        let crierEntries = pluginEntries.filter(isCrierOpenCodePluginEntry)
         if crierEntries.isEmpty { return .detectedNotWired }
         let entry = opencodePluginEntryPath()
         return crierEntries.contains(entry) ? .wired : .wiredOtherPath
@@ -505,16 +517,21 @@ enum Installer {
             try backup(url)
         }
 
+        // Drop ALL prior Crier plugin entries (case-insensitive, suffix
+        // match) AND de-duplicate non-Crier entries we leave in place.
+        // Without de-dup, a previously-buggy install (0.8.2) leaves a
+        // user with N duplicates of `@superwhisper/opencode` etc. — we
+        // collapse those to one as a side benefit so re-running fixes
+        // the file in one click.
         let existing = (json["plugin"] as? [String]) ?? []
-        // Drop any prior Crier plugin path (different Crier.app install,
-        // npm-linked package name, or stale translocated path), then add
-        // the fresh absolute path. Other plugins the user has wired stay
-        // intact.
-        let filtered = existing.filter { p in
-            !(p.contains("crier") && p.hasSuffix("opencode-plugin/dist/index.js"))
-                && p != "@crier/opencode-plugin"
+        var seen = Set<String>()
+        var filtered: [String] = []
+        for p in existing {
+            if isCrierOpenCodePluginEntry(p) { continue }
+            if seen.insert(p).inserted { filtered.append(p) }
         }
-        json["plugin"] = filtered + [entry]
+        filtered.append(entry)
+        json["plugin"] = filtered
 
         try writeJSON(json, to: url)
     }
