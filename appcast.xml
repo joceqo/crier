@@ -6,6 +6,19 @@
     <description>Sparkle appcast for Crier.app automatic updates.</description>
     <language>en</language>
     <item>
+      <title>0.8.5</title>
+      <link>https://github.com/joceqo/crier/releases/tag/v0.8.5</link>
+      <sparkle:version>0.8.5</sparkle:version>
+      <sparkle:shortVersionString>0.8.5</sparkle:shortVersionString>
+      <description><![CDATA[
+        <ul>
+          <li><strong>Summarize / Hide summary buttons read as real buttons.</strong> Earlier attempts (<code>.tertiary</code>, <code>Color.primary.opacity(0.12)</code>, <code>.regularMaterial</code>) all composited with the panel's vibrancy and came out almost invisible. The pill is now a fully opaque <code>controlBackgroundColor</code> base + primary tint + a thin border, so it stands out against the frosted panel.</li>
+        </ul>
+      ]]></description>
+      <pubDate>Fri, 08 May 2026 11:25:00 +0000</pubDate>
+      <enclosure url="https://github.com/joceqo/crier/releases/download/v0.8.5/Crier.app.zip" length="4171335" type="application/octet-stream" sparkle:edSignature="kPqgNCM9eUgk+NlR5HE8wcgjIlxoT8pdx0RLQhdzrhDmCL1tqYFKxYfm8wVtYNXKGLh/u4eZvhuBueeQKelEBA==" sparkle:minimumSystemVersion="14.0" />
+    </item>
+    <item>
       <title>0.8.4</title>
       <link>https://github.com/joceqo/crier/releases/tag/v0.8.4</link>
       <sparkle:version>0.8.4</sparkle:version>

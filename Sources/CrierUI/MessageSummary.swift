@@ -107,7 +107,24 @@ struct MessageWithOptionalSummary: View {
                     .foregroundStyle(.primary)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
-                    .background(Color.primary.opacity(0.12), in: Capsule())
+                    // Solid (non-transparent) capsule. Earlier attempts
+                    // used `.tertiary` / `Color.primary.opacity(0.12)` /
+                    // `.regularMaterial` — all of those still composited
+                    // with the panel's `menu` vibrancy and came out
+                    // washed out. Stacking a solid `controlBackgroundColor`
+                    // base with a primary-tint overlay gives a fully
+                    // opaque pill that reads as a real button.
+                    .background {
+                        Capsule()
+                            .fill(Color(nsColor: .controlBackgroundColor))
+                            .overlay {
+                                Capsule().fill(Color.primary.opacity(0.12))
+                            }
+                    }
+                    .overlay(
+                        Capsule()
+                            .strokeBorder(Color.primary.opacity(0.2), lineWidth: 0.5)
+                    )
                 }
                 .buttonStyle(.plain)
             } else {
@@ -123,7 +140,24 @@ struct MessageWithOptionalSummary: View {
                     .foregroundStyle(.primary)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
-                    .background(Color.primary.opacity(0.12), in: Capsule())
+                    // Solid (non-transparent) capsule. Earlier attempts
+                    // used `.tertiary` / `Color.primary.opacity(0.12)` /
+                    // `.regularMaterial` — all of those still composited
+                    // with the panel's `menu` vibrancy and came out
+                    // washed out. Stacking a solid `controlBackgroundColor`
+                    // base with a primary-tint overlay gives a fully
+                    // opaque pill that reads as a real button.
+                    .background {
+                        Capsule()
+                            .fill(Color(nsColor: .controlBackgroundColor))
+                            .overlay {
+                                Capsule().fill(Color.primary.opacity(0.12))
+                            }
+                    }
+                    .overlay(
+                        Capsule()
+                            .strokeBorder(Color.primary.opacity(0.2), lineWidth: 0.5)
+                    )
                 }
                 .buttonStyle(.plain)
             }
