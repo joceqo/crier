@@ -6,6 +6,23 @@
     <description>Sparkle appcast for Crier.app automatic updates.</description>
     <language>en</language>
     <item>
+      <title>0.8.6</title>
+      <link>https://github.com/joceqo/crier/releases/tag/v0.8.6</link>
+      <sparkle:version>0.8.6</sparkle:version>
+      <sparkle:shortVersionString>0.8.6</sparkle:shortVersionString>
+      <description><![CDATA[
+        <ul>
+          <li><strong>Correct icon for cursor-agent sessions.</strong> Both <code>~/.cursor/hooks.json</code> and <code>~/.claude/settings.json</code> Stop hooks fire on the same cursor-agent turn; the server's first-wins dedup picked <code>claude-code</code> ~half the time and the panel rendered the Claude icon for what was actually a Cursor turn. <code>crier-emit</code> now walks the parent process chain when invoked as <code>claude-code</code> and early-exits if <code>cursor-agent</code> is an ancestor.</li>
+          <li><strong>Unified tab strip.</strong> Single row of chips replaces the AgentBadge + tab-strip pair that duplicated the selected session. Each chip = brand icon + project label + vertical <code>⋮</code> kebab. Opaque system-adaptive backgrounds, no vibrancy bleed.</li>
+          <li><strong>Per-tab kebab actions.</strong> "Disable for this session" + "Mute 10 min" / "Mute 30 min". All release the blocking hook so the agent's terminal doesn't freeze, drop the tab, and switch the panel to the next session (or hide if none). Mute auto-expires by deadline.</li>
+          <li><strong>Drag-or-tap chip body.</strong> Click selects the tab; drag moves the panel.</li>
+          <li><strong>Panel re-centers on full dismiss.</strong> Resets <code>userPositionedPanel</code> so a one-time drag in any session no longer pins every future overlay across different projects/agents/hours.</li>
+        </ul>
+      ]]></description>
+      <pubDate>Fri, 08 May 2026 14:50:00 +0000</pubDate>
+      <enclosure url="https://github.com/joceqo/crier/releases/download/v0.8.6/Crier.app.zip" length="4171745" type="application/octet-stream" sparkle:edSignature="WnRqGD6jOp+/9fntMjwvlesTEsS/gV+an883h5UdbPNqLRhmfMIb3lMydEwrRuEtA2UW2/cgPFG+qY1wiqG7Dg==" sparkle:minimumSystemVersion="14.0" />
+    </item>
+    <item>
       <title>0.8.5</title>
       <link>https://github.com/joceqo/crier/releases/tag/v0.8.5</link>
       <sparkle:version>0.8.5</sparkle:version>
