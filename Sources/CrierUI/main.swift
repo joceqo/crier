@@ -38,16 +38,55 @@ private func feedbackDiagnosticsBody() -> String {
     let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
     let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
     let os = ProcessInfo.processInfo.operatingSystemVersionString
-    let logPath = uiLogFilePath()
+    let tails = diagnosticLogPaths()
+        .map { (label, path) in
+            "--- \(label) [\(path)] (last \(diagnosticTailLines) lines) ---\n\(tailFile(path: path, lines: diagnosticTailLines))"
+        }
+        .joined(separator: "\n\n")
     return """
     (Describe what happened or what you’d like — thanks.)
 
     —
     Crier: \(version) (\(build))
     macOS: \(os)
-    UI log: \(logPath)
 
+    \(tails)
     """
+}
+
+private let diagnosticTailLines = 60
+
+/// All log files we surface in feedback / "Reveal Logs". Stable order so
+/// the maintainer always sees them in the same sequence regardless of
+/// which were touched most recently.
+private func diagnosticLogPaths() -> [(label: String, path: String)] {
+    let home = NSHomeDirectory()
+    return [
+        ("crier-ui.log",            uiLogFilePath()),
+        ("crier-emit.log",          (home as NSString).appendingPathComponent(".claude/crier-emit.log")),
+        ("crier-empty-message.jsonl", (home as NSString).appendingPathComponent(".claude/crier-empty-message.jsonl")),
+    ]
+}
+
+/// Read the last N lines of `path` for inclusion in feedback bodies.
+/// Returns "(missing)" when the file doesn't exist; capping at 256 KB
+/// from the tail is enough to cover any realistic 60-line tail without
+/// loading multi-MB logs into memory.
+private func tailFile(path: String, lines: Int) -> String {
+    let url = URL(fileURLWithPath: path)
+    guard FileManager.default.fileExists(atPath: path) else { return "(missing)" }
+    guard let handle = try? FileHandle(forReadingFrom: url) else { return "(unreadable)" }
+    defer { try? handle.close() }
+    let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+    let size = (attrs?[.size] as? UInt64) ?? 0
+    let tailWindow: UInt64 = 256 * 1024
+    let offset = size > tailWindow ? size - tailWindow : 0
+    if offset > 0 { try? handle.seek(toOffset: offset) }
+    let data = (try? handle.readToEnd()) ?? Data()
+    let raw = String(data: data, encoding: .utf8) ?? ""
+    let split = raw.split(separator: "\n", omittingEmptySubsequences: false)
+    let tail = split.suffix(lines).joined(separator: "\n")
+    return tail.isEmpty ? "(empty)" : tail
 }
 
 private func uiLogFilePath() -> String {
@@ -1102,6 +1141,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         feedbackItem.target = self
         menu.addItem(feedbackItem)
 
+        let revealLogsItem = NSMenuItem(
+            title: "Reveal Logs in Finder…",
+            action: #selector(revealLogsInFinder(_:)),
+            keyEquivalent: ""
+        )
+        revealLogsItem.target = self
+        menu.addItem(revealLogsItem)
+
         let checkUpdatesItem = NSMenuItem(
             title: "Check for Updates…",
             action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
@@ -1261,6 +1308,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     @objc private func quitApp(_ sender: Any?) {
         NSApp.terminate(nil)
+    }
+
+    /// Stage every Crier log into a single timestamped folder under the
+    /// system temp dir and reveal it in Finder. The user can drag the
+    /// folder (or its contents) into an email or chat to share when
+    /// reporting issues. We always copy fresh — opening Finder on
+    /// `~/Library/Application Support/Crier/` would only show the UI log,
+    /// missing the crier-emit.log under `~/.claude/`.
+    @objc private func revealLogsInFinder(_ sender: Any?) {
+        let stamp = ISO8601DateFormatter().string(from: Date())
+            .replacingOccurrences(of: ":", with: "-")
+        let dir = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("crier-diagnostics-\(stamp)")
+        let fm = FileManager.default
+        try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+
+        // Drop a SUMMARY.txt with version/OS/paths so the recipient knows
+        // what they're looking at without opening every file.
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
+        let os = ProcessInfo.processInfo.operatingSystemVersionString
+        var summary = """
+        Crier diagnostics — staged \(stamp)
+        Crier: \(version) (\(build))
+        macOS: \(os)
+
+        Files in this folder:
+        """
+        for (label, path) in diagnosticLogPaths() {
+            let exists = fm.fileExists(atPath: path)
+            summary += "\n  - \(label) (\(exists ? "copied" : "MISSING")) ← \(path)"
+            guard exists else { continue }
+            let dst = (dir as NSString).appendingPathComponent(label)
+            // Overwrite if a previous reveal landed in the same second.
+            try? fm.removeItem(atPath: dst)
+            try? fm.copyItem(atPath: path, toPath: dst)
+        }
+        let summaryPath = (dir as NSString).appendingPathComponent("SUMMARY.txt")
+        try? summary.data(using: .utf8)?.write(to: URL(fileURLWithPath: summaryPath))
+
+        NSWorkspace.shared.selectFile(summaryPath, inFileViewerRootedAtPath: dir)
     }
 
     /// Native feedback: mail composer when `CrierFeedbackEmail` / `CRIER_FEEDBACK_EMAIL`

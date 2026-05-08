@@ -399,6 +399,208 @@ final class CrierServerTests: XCTestCase {
         )
     }
 
+    // MARK: - EventDedup (duplicate stop-hook coalescing)
+    //
+    // Cursor + Claude Code stop hooks both fire for one cursor-agent turn,
+    // with identical transcript_path but different session_ids. The server
+    // must publish only the first event and short-circuit the second
+    // hook's drain so it doesn't deadlock.
+
+    private func resetDedup() {
+        // Hub is internal to CrierServer; @testable import gives us access.
+        EventDedup.shared.reset()
+    }
+
+    /// Long-poll /current and capture how many events arrive within the
+    /// given window. Returns count plus body of the first event.
+    private func collectCurrentEvents(for seconds: Double) -> (count: Int, firstBody: String) {
+        let deadline = Date().addingTimeInterval(seconds)
+        var count = 0
+        var first = ""
+        while Date() < deadline {
+            let remaining = max(1, Int(ceil(deadline.timeIntervalSinceNow)))
+            guard let (data, resp) = get("/current?wait=\(remaining)", timeout: TimeInterval(remaining + 2)) else { break }
+            if resp.statusCode == 200 {
+                count += 1
+                if first.isEmpty { first = String(data: data, encoding: .utf8) ?? "" }
+            } else {
+                break
+            }
+        }
+        return (count, first)
+    }
+
+    func testDedupDropsSecondEventWithSameTranscriptPath() {
+        resetDedup()
+        let tp = "/tmp/dedup-test-\(UUID().uuidString)/x.jsonl"
+        // Park a /current waiter and within 100 ms post two identical events.
+        var collected = (count: 0, firstBody: "")
+        let sem = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            collected = self.collectCurrentEvents(for: 1.5)
+            sem.signal()
+        }
+        Thread.sleep(forTimeInterval: 0.1)
+        post("/event", body: [
+            "agent": "cursor", "event": "turn_done",
+            "session_id": "cursor-A", "transcript_path": tp,
+            "message": "first",
+        ])
+        Thread.sleep(forTimeInterval: 0.1)
+        post("/event", body: [
+            "agent": "claude-code", "event": "turn_done",
+            "session_id": "claude-code-A", "transcript_path": tp,
+            "message": "second (duplicate)",
+        ])
+        _ = sem.wait(timeout: .now() + 4)
+        XCTAssertEqual(collected.count, 1, "exactly one event should reach /current; second was deduped")
+        XCTAssertTrue(collected.firstBody.contains("first"), "first event should be the one published")
+    }
+
+    func testDedupAllowsSecondEventAfterWindow() {
+        resetDedup()
+        let tp = "/tmp/dedup-test-\(UUID().uuidString)/x.jsonl"
+        post("/event", body: [
+            "agent": "cursor", "event": "turn_done",
+            "session_id": "cursor-X", "transcript_path": tp,
+        ])
+        // Sleep past the 2-second window before re-posting.
+        Thread.sleep(forTimeInterval: 2.3)
+        var collected = (count: 0, firstBody: "")
+        let sem = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            collected = self.collectCurrentEvents(for: 1.5)
+            sem.signal()
+        }
+        Thread.sleep(forTimeInterval: 0.1)
+        post("/event", body: [
+            "agent": "cursor", "event": "turn_done",
+            "session_id": "cursor-X", "transcript_path": tp,
+        ])
+        _ = sem.wait(timeout: .now() + 4)
+        XCTAssertGreaterThanOrEqual(collected.count, 1, "second event after window must broadcast")
+    }
+
+    func testDedupReleasesDuplicateDrainImmediately() {
+        resetDedup()
+        let tp = "/tmp/dedup-test-\(UUID().uuidString)/x.jsonl"
+        let primarySession = "claude-code-PRIMARY-\(UUID().uuidString)"
+        let subSession = "cursor-SUB-\(UUID().uuidString)"
+
+        post("/event", body: [
+            "agent": "claude-code", "event": "turn_done",
+            "session_id": primarySession, "transcript_path": tp,
+        ])
+        post("/event", body: [
+            "agent": "cursor", "event": "turn_done",
+            "session_id": subSession, "transcript_path": tp,
+        ])
+        // The subordinate's drain should return 204 well within wait_ms.
+        let started = Date()
+        guard let (_, resp) = get("/reply/drain?session_id=\(subSession)&wait_ms=5000", timeout: 6) else {
+            return XCTFail("no response from subordinate drain")
+        }
+        let elapsed = Date().timeIntervalSince(started)
+        XCTAssertEqual(resp.statusCode, 204)
+        XCTAssertLessThan(elapsed, 1.0, "subordinate drain should short-circuit instead of waiting wait_ms")
+    }
+
+    func testDedupReleasesDuplicateLegacyReplyImmediately() {
+        resetDedup()
+        let tp = "/tmp/dedup-test-\(UUID().uuidString)/x.jsonl"
+        let subRequestId = "cursor-req-\(UUID().uuidString)"
+
+        post("/event", body: [
+            "agent": "cursor", "event": "turn_done",
+            "session_id": "cursor-FIRST", "transcript_path": tp,
+            "request_id": "primary-req",
+        ])
+        post("/event", body: [
+            "agent": "cursor", "event": "turn_done",
+            "session_id": "cursor-SECOND", "transcript_path": tp,
+            "request_id": subRequestId,
+        ])
+        let started = Date()
+        guard let (_, resp) = get("/reply?request_id=\(subRequestId)&wait=5", timeout: 6) else {
+            return XCTFail("no response from subordinate /reply")
+        }
+        let elapsed = Date().timeIntervalSince(started)
+        XCTAssertEqual(resp.statusCode, 204)
+        XCTAssertLessThan(elapsed, 1.0, "subordinate /reply long-poll should short-circuit")
+    }
+
+    func testDedupDoesNotApplyToDismissEvents() {
+        resetDedup()
+        let tp = "/tmp/dedup-test-\(UUID().uuidString)/x.jsonl"
+        var collected = (count: 0, firstBody: "")
+        let sem = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            collected = self.collectCurrentEvents(for: 1.5)
+            sem.signal()
+        }
+        Thread.sleep(forTimeInterval: 0.1)
+        post("/event", body: [
+            "agent": "cursor", "event": "dismiss",
+            "session_id": "s1", "transcript_path": tp,
+        ])
+        Thread.sleep(forTimeInterval: 0.1)
+        post("/event", body: [
+            "agent": "claude-code", "event": "dismiss",
+            "session_id": "s2", "transcript_path": tp,
+        ])
+        _ = sem.wait(timeout: .now() + 4)
+        XCTAssertGreaterThanOrEqual(collected.count, 2, "dismiss events must always pass through")
+    }
+
+    func testDedupKeyDifferentEventsDontCollide() {
+        resetDedup()
+        let tp = "/tmp/dedup-test-\(UUID().uuidString)/x.jsonl"
+        var collected = (count: 0, firstBody: "")
+        let sem = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            collected = self.collectCurrentEvents(for: 1.5)
+            sem.signal()
+        }
+        Thread.sleep(forTimeInterval: 0.1)
+        post("/event", body: [
+            "agent": "cursor", "event": "turn_done",
+            "session_id": "s1", "transcript_path": tp,
+        ])
+        Thread.sleep(forTimeInterval: 0.05)
+        post("/event", body: [
+            "agent": "cursor", "event": "needs_input",
+            "session_id": "s1", "transcript_path": tp,
+        ])
+        _ = sem.wait(timeout: .now() + 4)
+        XCTAssertGreaterThanOrEqual(collected.count, 2, "different events on same transcript must both publish")
+    }
+
+    func testDedupFallsBackToSessionIdWhenNoTranscriptPath() {
+        // Codex-style payload: no transcript_path, message comes via stdin.
+        // Two events with the same session_id within the window should
+        // dedup on (session_id, event).
+        resetDedup()
+        let sid = "codex-\(UUID().uuidString)"
+        var collected = (count: 0, firstBody: "")
+        let sem = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            collected = self.collectCurrentEvents(for: 1.5)
+            sem.signal()
+        }
+        Thread.sleep(forTimeInterval: 0.1)
+        post("/event", body: [
+            "agent": "codex", "event": "turn_done",
+            "session_id": sid, "message": "first",
+        ])
+        Thread.sleep(forTimeInterval: 0.1)
+        post("/event", body: [
+            "agent": "codex", "event": "turn_done",
+            "session_id": sid, "message": "second",
+        ])
+        _ = sem.wait(timeout: .now() + 4)
+        XCTAssertEqual(collected.count, 1, "second event with same session_id must dedup")
+    }
+
     // MARK: - shell helpers (tmux test)
 
     private func which(_ tool: String) -> String? {

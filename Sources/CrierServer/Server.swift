@@ -158,6 +158,148 @@ private final class ReplyHub: @unchecked Sendable {
     }
 }
 
+// MARK: - EventDedup
+//
+// Some agent stop hooks fire BOTH for one logical turn — most commonly
+// when cursor-agent runs and `~/.cursor/hooks.json` `stop` AND
+// `~/.claude/settings.json` `Stop` both fire at the same wall-clock
+// second with identical `transcript_path`. Without dedup the user sees
+// two overlays per turn and one of the hooks deadlocks at the 9-minute
+// drain ceiling because the UI's reply only routes to one of the two
+// session_ids.
+//
+// Rules:
+//   - Window: 2 seconds. Real double-emits fire within the same wall-clock
+//     second; legitimate back-to-back turns rarely complete that fast.
+//   - Key: (transcript_path, event) when transcript_path is present;
+//     (session_id, event) as fallback (codex-style payloads). Using
+//     transcript_path is essential because the duplicate hooks produce
+//     *different* session_ids (`<agent>-<rawSessionId>`).
+//   - Whitelist: only turn_done / needs_permission / needs_input are
+//     deduped. dismiss must always pass through (each hook needs its own
+//     queue cleared).
+//   - First wins. The duplicate POST /event is dropped (no broadcast),
+//     and its session_id + request_id are flagged so its drain or legacy
+//     long-poll returns 204 immediately. The subordinate hook exits clean
+//     without decision:block; the agent unblocks normally.
+//   - GC on every shouldPublish; hard cap of 256 in-flight primaries.
+//
+// Internal (not private) so @testable import can call reset() between
+// test cases.
+final class EventDedup: @unchecked Sendable {
+    static let shared = EventDedup()
+    private let lock = NSLock()
+
+    private struct Entry {
+        let primarySession: String
+        let primaryRequestId: String?
+        let deadline: Date
+    }
+    private var primaries: [String: Entry] = [:]
+    private var subordinateSessions: [String: Date] = [:]
+    private var subordinateRequestIds: [String: Date] = [:]
+
+    private static let windowSeconds: TimeInterval = 2.0
+    private static let maxPrimaries = 256
+    private static let dedupedEvents: Set<String> = ["turn_done", "needs_permission", "needs_input"]
+
+    /// Decide whether a POST /event should be broadcast. Returns false
+    /// when the call is a duplicate within the window — in that case the
+    /// duplicate's session_id and request_id are flagged for short-circuit
+    /// in subsequent drain/long-poll handlers.
+    func shouldPublish(
+        transcriptPath: String?,
+        event: String,
+        sessionId: String,
+        requestId: String?
+    ) -> Bool {
+        guard EventDedup.dedupedEvents.contains(event) else { return true }
+        guard let key = dedupKey(transcriptPath: transcriptPath, sessionId: sessionId, event: event) else {
+            return true
+        }
+
+        lock.lock()
+        defer { lock.unlock() }
+        gcLocked()
+
+        let now = Date()
+        if let existing = primaries[key], existing.deadline > now {
+            if existing.primarySession != sessionId, !sessionId.isEmpty {
+                subordinateSessions[sessionId] = existing.deadline
+            }
+            if let rid = requestId, !rid.isEmpty,
+               existing.primaryRequestId != rid {
+                subordinateRequestIds[rid] = existing.deadline
+            }
+            return false
+        }
+        primaries[key] = Entry(
+            primarySession: sessionId,
+            primaryRequestId: requestId,
+            deadline: now.addingTimeInterval(EventDedup.windowSeconds)
+        )
+        return true
+    }
+
+    func isSubordinateSession(_ sessionId: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let d = subordinateSessions[sessionId] else { return false }
+        if d <= Date() {
+            subordinateSessions.removeValue(forKey: sessionId)
+            return false
+        }
+        return true
+    }
+
+    func isSubordinateRequestId(_ requestId: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let d = subordinateRequestIds[requestId] else { return false }
+        if d <= Date() {
+            subordinateRequestIds.removeValue(forKey: requestId)
+            return false
+        }
+        return true
+    }
+
+    /// Test-only: clear all dedup state. The shared singleton is reused
+    /// across server-test cases, so each test that depends on dedup
+    /// behavior calls this in its setUp.
+    func reset() {
+        lock.lock()
+        primaries.removeAll()
+        subordinateSessions.removeAll()
+        subordinateRequestIds.removeAll()
+        lock.unlock()
+    }
+
+    private func dedupKey(transcriptPath: String?, sessionId: String, event: String) -> String? {
+        if let tp = transcriptPath, !tp.isEmpty {
+            return "tp:\(tp)|\(event)"
+        }
+        if !sessionId.isEmpty, sessionId != "?" {
+            return "sid:\(sessionId)|\(event)"
+        }
+        return nil
+    }
+
+    private func gcLocked() {
+        let now = Date()
+        primaries = primaries.filter { $0.value.deadline > now }
+        subordinateSessions = subordinateSessions.filter { $0.value > now }
+        subordinateRequestIds = subordinateRequestIds.filter { $0.value > now }
+        if primaries.count > EventDedup.maxPrimaries {
+            let trim = primaries.count - EventDedup.maxPrimaries
+            let toDrop = primaries
+                .sorted { $0.value.deadline < $1.value.deadline }
+                .prefix(trim)
+                .map { $0.key }
+            for k in toDrop { primaries.removeValue(forKey: k) }
+        }
+    }
+}
+
 // MARK: - ReplyQueueHub
 //
 // Pre-queue architecture (see crier-prequeue-architecture.md). Mirrors
@@ -410,6 +552,19 @@ private final class CrierHTTPHandler: ChannelInboundHandler, @unchecked Sendable
         let message = parsed["message"] as? String ?? ""
         let replyChannel = parsed["reply_channel"] as? String
         let replyTarget = parsed["reply_target"] as? String
+        let transcriptPath = parsed["transcript_path"] as? String
+
+        // Dedup duplicate stop-hook fires (cursor + claude-code stop both
+        // firing for one cursor turn; same transcript_path, different
+        // session_ids). When this returns false the caller's drain/long-poll
+        // will short-circuit via EventDedup.isSubordinate*, releasing the
+        // subordinate hook without an extra overlay.
+        let shouldPublish = EventDedup.shared.shouldPublish(
+            transcriptPath: transcriptPath,
+            event: event,
+            sessionId: session,
+            requestId: requestId
+        )
 
         var line = "[\(isoFormatter.string(from: Date()))] \(event) · \(agent) · \(cwd)\n"
         line += "  session: \(session)\n"
@@ -421,6 +576,9 @@ private final class CrierHTTPHandler: ChannelInboundHandler, @unchecked Sendable
             let firstLine = message.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? message
             let preview: String = firstLine.count > 240 ? String(firstLine.prefix(240)) + "…" : firstLine
             line += "  message: \(preview)\n"
+        }
+        if !shouldPublish {
+            line += "  dedup:   subordinate (transcript already in flight)\n"
         }
         FileHandle.standardOutput.write(Data(line.utf8))
 
@@ -452,7 +610,9 @@ private final class CrierHTTPHandler: ChannelInboundHandler, @unchecked Sendable
             ReplyQueueHub.shared.clear(sessionId: session)
         }
 
-        EventHub.shared.publish(body)
+        if shouldPublish {
+            EventHub.shared.publish(body)
+        }
     }
 
     private func handleGetCurrent(uri: String, eventLoop: EventLoop) -> EventLoopFuture<(HTTPResponseStatus, String, String)> {
@@ -525,6 +685,12 @@ private final class CrierHTTPHandler: ChannelInboundHandler, @unchecked Sendable
               !requestId.isEmpty else {
             return eventLoop.makeSucceededFuture((.badRequest, "application/json", #"{"error":"missing request_id"}"#))
         }
+        // Subordinate of a deduped duplicate /event — short-circuit instead
+        // of long-polling. The originating hook will exit clean without a
+        // decision:block; the agent unblocks normally.
+        if EventDedup.shared.isSubordinateRequestId(requestId) {
+            return eventLoop.makeSucceededFuture((.noContent, "application/json", ""))
+        }
         let waitSeconds = Int(comps.queryItems?.first(where: { $0.name == "wait" })?.value ?? "30") ?? 30
         let clamped = max(1, min(600, waitSeconds))
 
@@ -572,6 +738,11 @@ private final class CrierHTTPHandler: ChannelInboundHandler, @unchecked Sendable
               let session = comps.queryItems?.first(where: { $0.name == "session_id" })?.value,
               !session.isEmpty else {
             return eventLoop.makeSucceededFuture((.badRequest, "application/json", #"{"error":"missing session_id"}"#))
+        }
+        // Subordinate of a deduped duplicate /event — short-circuit so the
+        // originating hook exits clean without a 9-min wait.
+        if EventDedup.shared.isSubordinateSession(session) {
+            return eventLoop.makeSucceededFuture((.noContent, "application/json", ""))
         }
         let waitMs = Int(comps.queryItems?.first(where: { $0.name == "wait_ms" })?.value ?? "3000") ?? 3000
         // Cap at 600 s. SW's claude-hook polls 300 s; we allow up to

@@ -182,6 +182,206 @@ final class CrierEmitCoreTests: XCTestCase {
         XCTAssertEqual(CrierEmitCore.extractLastAssistantMessage(transcript: transcript), "")
     }
 
+    // MARK: - Cursor envelope (role:"assistant")
+    //
+    // Cursor's JSONL transcripts use `"role":"assistant"` at the top level
+    // instead of Claude Code's `"type":"assistant"`. The content grammar
+    // inside `message.content` is identical (array of `{type:"text",...}`
+    // and `{type:"tool_use",...}` blocks), so detection just needs to
+    // accept either envelope key.
+
+    func testCursorRoleEnvelopeWithTextBlock() {
+        let transcript = #"""
+        {"role":"user","message":{"content":[{"type":"text","text":"hi"}]}}
+        {"role":"assistant","message":{"content":[{"type":"text","text":"hello from cursor"}]}}
+        """#
+        XCTAssertEqual(
+            CrierEmitCore.extractLastAssistantMessage(transcript: transcript),
+            "hello from cursor"
+        )
+    }
+
+    func testCursorRoleEnvelopeMixedTextAndToolUse() {
+        // Verbatim shape from /Users/joce/.cursor/projects/.../*.jsonl: a
+        // text block followed by a tool_use (Cursor's tool names differ from
+        // Claude's — `ReadFile` here — but that's irrelevant since we filter
+        // on block.type, not block.name).
+        let transcript = #"""
+        {"role":"assistant","message":{"content":[{"type":"text","text":"You're seeing a harness page"},{"type":"tool_use","name":"ReadFile","input":{"path":"/tmp/x"}}]}}
+        """#
+        XCTAssertEqual(
+            CrierEmitCore.extractLastAssistantMessage(transcript: transcript),
+            "You're seeing a harness page"
+        )
+    }
+
+    func testCursorToolUseOnlyTurnSkipsToPreviousText() {
+        let transcript = #"""
+        {"role":"assistant","message":{"content":[{"type":"text","text":"earlier visible answer"}]}}
+        {"role":"assistant","message":{"content":[{"type":"tool_use","name":"Shell","input":{"command":"ls"}}]}}
+        """#
+        XCTAssertEqual(
+            CrierEmitCore.extractLastAssistantMessage(transcript: transcript),
+            "earlier visible answer"
+        )
+    }
+
+    func testCursorEmptyFinalTurnReturnsEmpty() {
+        // The "don't show stale text" invariant must hold across both
+        // envelope shapes: an empty-text final assistant turn returns ""
+        // even though there is a non-empty earlier turn.
+        let transcript = #"""
+        {"role":"assistant","message":{"content":[{"type":"text","text":"earlier"}]}}
+        {"role":"assistant","message":{"content":[{"type":"text","text":""}]}}
+        """#
+        XCTAssertEqual(CrierEmitCore.extractLastAssistantMessage(transcript: transcript), "")
+    }
+
+    func testMixedClaudeCodeAndCursorEnvelopesInOneFile() {
+        // Defensive: a single transcript containing both envelope shapes
+        // (e.g. agent migration mid-session) still resolves the last
+        // assistant turn correctly regardless of which envelope it uses.
+        let transcript = #"""
+        {"type":"assistant","message":{"content":"old claude turn"}}
+        {"role":"assistant","message":{"content":[{"type":"text","text":"new cursor turn"}]}}
+        """#
+        XCTAssertEqual(
+            CrierEmitCore.extractLastAssistantMessage(transcript: transcript),
+            "new cursor turn"
+        )
+    }
+
+    // MARK: - cwd recovery (CrierEmitCore.recoverCwdFromTranscript)
+    //
+    // Cursor reports its config dir as `cwd` in hook stdin; the project
+    // dir is encoded in `transcript_path` as `<configDir>/projects/<encoded>/...`
+    // where `<encoded>` is the absolute path with `/` replaced by `-`.
+    // Decoding is filesystem-validated because real path components can
+    // legitimately contain dashes (`tinker-app`).
+
+    /// Builds an isolated temp "home" with a fake `.cursor` config dir
+    /// and the requested project dirs created on real disk. Returns
+    /// (home, configDir, cleanup). Tests pass `home` and `configDirNames`
+    /// into recoverCwdFromTranscript so the helper probes our fake tree.
+    private func makeFakeHome(projectSubpaths: [String], file: StaticString = #filePath, line: UInt = #line) -> (home: String, configDir: String, cleanup: () -> Void) {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("crier-recover-\(UUID().uuidString)")
+            .standardizedFileURL
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        let home = base.path
+        let configDir = (home as NSString).appendingPathComponent(".cursor")
+        try? FileManager.default.createDirectory(atPath: configDir, withIntermediateDirectories: true)
+        for sub in projectSubpaths {
+            let p = (home as NSString).appendingPathComponent(sub)
+            do {
+                try FileManager.default.createDirectory(atPath: p, withIntermediateDirectories: true)
+            } catch {
+                XCTFail("setup: could not create \(p): \(error)", file: file, line: line)
+            }
+        }
+        return (home, configDir, { try? FileManager.default.removeItem(at: base) })
+    }
+
+    /// Encode an absolute path the way Cursor does (Claude Code prepends a
+    /// leading `-`; we'll test both forms separately).
+    private func cursorEncode(_ absolutePath: String) -> String {
+        var s = absolutePath
+        if s.hasPrefix("/") { s.removeFirst() }
+        return s.replacingOccurrences(of: "/", with: "-")
+    }
+
+    func testRecoverCwdReturnsStdinWhenNotSuspicious() {
+        // Claude Code passes a real project cwd. Even with a transcript
+        // path present, the trust gate must leave stdinCwd untouched.
+        let (home, _, cleanup) = makeFakeHome(projectSubpaths: ["Desktop/coding/crier"])
+        defer { cleanup() }
+        let realCwd = (home as NSString).appendingPathComponent("Desktop/coding/crier")
+        let encoded = cursorEncode(realCwd)
+        let transcript = "\(home)/.cursor/projects/\(encoded)/agent-transcripts/abc/abc.jsonl"
+        let recovered = CrierEmitCore.recoverCwdFromTranscript(
+            stdinCwd: realCwd,
+            transcriptPath: transcript,
+            home: home,
+            configDirNames: [".cursor"]
+        )
+        XCTAssertEqual(recovered, realCwd)
+    }
+
+    func testRecoverCwdDecodesCleanProjectName() {
+        // Cursor passes its own config dir as cwd; recover via transcript.
+        let (home, configDir, cleanup) = makeFakeHome(projectSubpaths: ["Desktop/coding/mochi"])
+        defer { cleanup() }
+        let realProject = (home as NSString).appendingPathComponent("Desktop/coding/mochi")
+        let encoded = cursorEncode(realProject)
+        let transcript = "\(configDir)/projects/\(encoded)/agent-transcripts/abc/abc.jsonl"
+        let recovered = CrierEmitCore.recoverCwdFromTranscript(
+            stdinCwd: configDir,
+            transcriptPath: transcript,
+            home: home,
+            configDirNames: [".cursor"]
+        )
+        XCTAssertEqual(recovered, realProject)
+    }
+
+    func testRecoverCwdDecodesNameWithDashGreedy() {
+        // Real dir has a literal dash (`tinker-app`). Greedy walk must
+        // pick `.../tinker-app`, not `.../tinker/app` (which doesn't exist).
+        let (home, configDir, cleanup) = makeFakeHome(projectSubpaths: ["Desktop/coding/tinker-app"])
+        defer { cleanup() }
+        let realProject = (home as NSString).appendingPathComponent("Desktop/coding/tinker-app")
+        let encoded = cursorEncode(realProject)
+        let transcript = "\(configDir)/projects/\(encoded)/agent-transcripts/abc/abc.jsonl"
+        let recovered = CrierEmitCore.recoverCwdFromTranscript(
+            stdinCwd: configDir,
+            transcriptPath: transcript,
+            home: home,
+            configDirNames: [".cursor"]
+        )
+        XCTAssertEqual(recovered, realProject)
+    }
+
+    func testRecoverCwdReturnsInputWhenNoCandidateExists() {
+        // Encoded points to a non-existent path → return stdinCwd, never invent.
+        let (home, configDir, cleanup) = makeFakeHome(projectSubpaths: [])
+        defer { cleanup() }
+        let bogus = (home as NSString).appendingPathComponent("Desktop/coding/never-existed")
+        let encoded = cursorEncode(bogus)
+        let transcript = "\(configDir)/projects/\(encoded)/agent-transcripts/abc/abc.jsonl"
+        let recovered = CrierEmitCore.recoverCwdFromTranscript(
+            stdinCwd: configDir,
+            transcriptPath: transcript,
+            home: home,
+            configDirNames: [".cursor"]
+        )
+        XCTAssertEqual(recovered, configDir)
+    }
+
+    func testRecoverCwdReturnsInputWhenTranscriptPathIsSystemTemp() {
+        // Cursor sometimes uses encoded names that are session UUIDs or
+        // var-folders temp-path encodings. If no full-match candidate exists
+        // under our (fake) home, recovery must bail out.
+        let (home, configDir, cleanup) = makeFakeHome(projectSubpaths: [])
+        defer { cleanup() }
+        let transcript = "\(configDir)/projects/1777491472785/agent-transcripts/abc/abc.jsonl"
+        let recovered = CrierEmitCore.recoverCwdFromTranscript(
+            stdinCwd: configDir,
+            transcriptPath: transcript,
+            home: home,
+            configDirNames: [".cursor"]
+        )
+        XCTAssertEqual(recovered, configDir)
+    }
+
+    func testRecoverCwdReturnsInputWhenNoTranscriptPath() {
+        let (_, configDir, cleanup) = makeFakeHome(projectSubpaths: [])
+        defer { cleanup() }
+        let recovered = CrierEmitCore.recoverCwdFromTranscript(
+            stdinCwd: configDir,
+            transcriptPath: nil
+        )
+        XCTAssertEqual(recovered, configDir)
+    }
+
     func testIsGloballyDisabledReturnsFalseWhenFlagAbsent() {
         // The flag path should not exist in a clean test environment.
         let flagPath = CrierEmitCore.globalDisabledPath

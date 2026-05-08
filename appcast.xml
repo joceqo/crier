@@ -6,6 +6,21 @@
     <description>Sparkle appcast for Crier.app automatic updates.</description>
     <language>en</language>
     <item>
+      <title>0.8.0</title>
+      <link>https://github.com/joceqo/crier/releases/tag/v0.8.0</link>
+      <sparkle:version>0.8.0</sparkle:version>
+      <sparkle:shortVersionString>0.8.0</sparkle:shortVersionString>
+      <description><![CDATA[
+        <ul>
+          <li><strong>Cursor support fixed</strong>: parser now reads Cursor's <code>role:"assistant"</code> transcript envelope, the project name is recovered from <code>transcript_path</code> when stdin reports <code>~/.cursor</code>, and duplicate stop hooks (cursor + claude-code firing for one cursor turn) are deduped server-side so you see one overlay per turn instead of two.</li>
+          <li><strong>Reveal Logs in Finder…</strong>: new menu item stages every Crier log into a single folder and opens Finder there for quick triage.</li>
+          <li>Send Feedback now embeds the tails of <code>crier-ui.log</code>, <code>crier-emit.log</code>, and the empty-message diagnostic inline.</li>
+        </ul>
+      ]]></description>
+      <pubDate>Fri, 08 May 2026 08:50:00 +0000</pubDate>
+      <enclosure url="https://github.com/joceqo/crier/releases/download/v0.8.0/Crier.app.zip" length="4160707" type="application/octet-stream" sparkle:edSignature="wk6rioDypGKUpgiRRRnZt1utZouXmqwKUmRgiwnk4wFyuH0LGf64YhwreY/dzd5oq4GEfZXwHTUhF6Xeje8iAQ==" sparkle:minimumSystemVersion="14.0" />
+    </item>
+    <item>
       <title>0.7.1</title>
       <link>https://github.com/joceqo/crier/releases/tag/v0.7.1</link>
       <sparkle:version>0.7.1</sparkle:version>

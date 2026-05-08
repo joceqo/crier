@@ -99,7 +99,15 @@ let stdinJSON = (try? JSONSerialization.jsonObject(with: stdinData)) as? [String
 let env = ProcessInfo.processInfo.environment
 let crierPort = Int(env["CRIER_PORT"] ?? "") ?? 8731
 let crierBase = "http://127.0.0.1:\(crierPort)"
-let cwd = (stdinJSON["cwd"] as? String) ?? FileManager.default.currentDirectoryPath
+let rawCwd = (stdinJSON["cwd"] as? String) ?? FileManager.default.currentDirectoryPath
+// Cursor (and possibly others) reports its config dir as `cwd` in hook
+// stdin; recover the real project from `transcript_path` in that case.
+// Claude Code passes the right cwd already and the trust gate inside
+// recoverCwdFromTranscript leaves it unchanged.
+let cwd = CrierEmitCore.recoverCwdFromTranscript(
+    stdinCwd: rawCwd,
+    transcriptPath: stdinJSON["transcript_path"] as? String
+)
 let sessionIdRaw = (stdinJSON["session_id"] as? String) ?? String(UUID().uuidString.prefix(8))
 // Same id we post on the wire and persist for per-session disable flags.
 // `<agent>-<rawSessionId>` keeps two identical raw ids from different
@@ -314,7 +322,11 @@ func drainReplyQueue(sessionId: String, baseWaitMs: Int) -> String? {
 }
 
 log("start: agent=\(agent) event=\(event) blocking=\(blockingEvent) request_id=\(requestId)")
-log("cwd=\(cwd) tmux_pane=\(env["TMUX_PANE"] ?? "-")")
+if cwd != rawCwd {
+    log("cwd=\(cwd) (recovered from raw=\(rawCwd) via transcript_path) tmux_pane=\(env["TMUX_PANE"] ?? "-")")
+} else {
+    log("cwd=\(cwd) tmux_pane=\(env["TMUX_PANE"] ?? "-")")
+}
 
 // Short-circuit if Crier is disabled — globally (menu-bar toggle), for
 // this CWD (`/crier off` skill), or for this specific conversation (the

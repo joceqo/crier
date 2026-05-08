@@ -11,23 +11,37 @@ public enum CrierEmitCore {
 
     /// Last assistant **turn** in the JSONL transcript (scanning from the bottom).
     ///
+    /// Accepts both envelope shapes we've seen in the wild:
+    /// - Claude Code: `{"type":"assistant","message":{...}}`
+    /// - Cursor:      `{"role":"assistant","message":{...}}`
+    /// The downstream content grammar (`{type:"text",text:"..."}` blocks, optional
+    /// `tool_use` siblings) is identical, so detection is a per-line OR on the two keys.
+    ///
     /// - String `content`, including `""`, is returned as-is so an empty final turn does not
     ///   show the previous assistant message (stale UI).
     /// - Array `content` with only `text` blocks joins non-empty parts; if there is at least
     ///   one `text` block but all are empty, returns `""`.
     /// - Assistant lines with only non-text blocks (e.g. `tool_use`) are skipped so the last
     ///   **visible** text is used when the model ends on a tool call.
+    /// - As defensive fallback, if an assistant line lacks a `message` envelope, we try
+    ///   reading `content` directly off the top-level object.
     public static func extractLastAssistantMessage(transcript: String) -> String {
         let lines = transcript.split(separator: "\n", omittingEmptySubsequences: true)
         for line in lines.reversed() {
             guard let data = line.data(using: .utf8),
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  (obj["type"] as? String) == "assistant",
-                  let message = obj["message"] as? [String: Any] else { continue }
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            let isAssistant = (obj["type"] as? String) == "assistant"
+                              || (obj["role"] as? String) == "assistant"
+            guard isAssistant else { continue }
 
-            guard let rawContent = message["content"] else {
-                continue
+            let rawContent: Any?
+            if let message = obj["message"] as? [String: Any] {
+                rawContent = message["content"]
+            } else {
+                rawContent = obj["content"]
             }
+            guard let rawContent = rawContent else { continue }
+
             if rawContent is NSNull {
                 return ""
             }
@@ -52,6 +66,93 @@ public enum CrierEmitCore {
             continue
         }
         return ""
+    }
+
+    // MARK: - cwd recovery
+    //
+    // Some agents (notably Cursor) report their *config* dir as `cwd` in
+    // hook stdin instead of the project the user was actually running in.
+    // The truth is recoverable from `transcript_path`, which always lives
+    // at `<configDir>/projects/<encoded>/...` where `<encoded>` is the
+    // absolute project path with `/` replaced by `-` (Cursor: no leading
+    // dash; Claude Code: leading dash). The encoding is lossy when a real
+    // directory contains a literal `-` (`tinker-app`, `test-ux-researcher`),
+    // so decoding requires filesystem validation: we walk the tree picking
+    // the longest fully-existing path. Tie-break: fewer path components
+    // wins (more dashes preserved — the conservative choice).
+
+    public static let agentConfigDirNames: [String] = [
+        ".cursor", ".claude", ".codex", ".opencode"
+    ]
+
+    /// Recover the project cwd when stdin's cwd points at the agent's
+    /// own config dir. Returns `stdinCwd` unchanged in every case where
+    /// we can't confidently improve on it: non-suspicious cwd, missing
+    /// transcript path, no `<configDir>/projects/<encoded>/` segment, or
+    /// no candidate directory exists for the decoded encoding.
+    ///
+    /// `home`, `configDirNames`, and `fileManager` are injectable so unit
+    /// tests can assemble a hermetic fake home with real subdirectories.
+    public static func recoverCwdFromTranscript(
+        stdinCwd: String,
+        transcriptPath: String?,
+        home: String = NSHomeDirectory(),
+        configDirNames: [String] = agentConfigDirNames,
+        fileManager: FileManager = .default
+    ) -> String {
+        let configDirs = configDirNames.map {
+            (home as NSString).appendingPathComponent($0)
+        }
+        let stdinIsSuspicious = configDirs.contains { dir in
+            stdinCwd == dir || stdinCwd.hasPrefix(dir + "/")
+        }
+        guard stdinIsSuspicious else { return stdinCwd }
+        guard let tp = transcriptPath, !tp.isEmpty else { return stdinCwd }
+
+        let parts = URL(fileURLWithPath: tp).pathComponents
+        var encoded: String?
+        for i in 0..<parts.count {
+            if parts[i] == "projects", i + 1 < parts.count {
+                encoded = parts[i + 1]
+                break
+            }
+        }
+        guard var name = encoded, !name.isEmpty else { return stdinCwd }
+        if name.hasPrefix("-") { name = String(name.dropFirst()) }
+
+        let tokens = name
+            .split(separator: "-", omittingEmptySubsequences: true)
+            .map(String.init)
+        if tokens.isEmpty { return stdinCwd }
+
+        var best = ""
+        var budget = 64
+        func walk(remaining: ArraySlice<String>, current: String) {
+            if budget <= 0 { return }
+            if remaining.isEmpty {
+                let bestComps = best.split(separator: "/").count
+                let curComps = current.split(separator: "/").count
+                if current.count > best.count
+                    || (current.count == best.count && curComps < bestComps) {
+                    best = current
+                }
+                return
+            }
+            for i in 1...remaining.count {
+                if budget <= 0 { return }
+                budget -= 1
+                let component = remaining.prefix(i).joined(separator: "-")
+                let next = current + "/" + component
+                var isDir: ObjCBool = false
+                if fileManager.fileExists(atPath: next, isDirectory: &isDir),
+                   isDir.boolValue {
+                    walk(remaining: remaining.dropFirst(i), current: next)
+                }
+            }
+        }
+        walk(remaining: tokens[...], current: "")
+
+        return best.count > 1 ? best : stdinCwd
     }
 
     public static let crierAgentDir = "/tmp/crier-agent"
