@@ -40,9 +40,13 @@ import CrierEmitCore
 
 // ISO8601DateFormatter is documented as thread-safe; mark nonisolated so we
 // can format timestamps from any handler context under Swift 6 strict concurrency.
+// Local timezone (with offset like `+02:00`) so log lines match wall-clock
+// time on the user's machine — UTC stamps in `crier-server.log` were
+// confusing when comparing against macOS Console / Finder timestamps.
 nonisolated(unsafe) private let isoFormatter: ISO8601DateFormatter = {
     let f = ISO8601DateFormatter()
     f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    f.timeZone = TimeZone.current
     return f
 }()
 

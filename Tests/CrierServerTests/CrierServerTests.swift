@@ -575,6 +575,46 @@ final class CrierServerTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(collected.count, 2, "different events on same transcript must both publish")
     }
 
+    /// Regression: an end-to-end check that `crier-emit`'s actual payload
+    /// shape carries `transcript_path` so the server's dedup key can match
+    /// across cursor + claude-code stop hooks. Built by replicating the
+    /// fields crier-emit/main.swift sets — if that file ever drops
+    /// transcript_path again, this test fails the way 0.8.0 should have
+    /// failed before release. Two payloads with the same transcript path
+    /// but different (agent, session_id, request_id) — the second must
+    /// dedup and the second's `request_id` must short-circuit on /reply.
+    func testDedupRecognizesEmitShapedPayloads() {
+        resetDedup()
+        let tp = "/tmp/dedup-emit-shaped-\(UUID().uuidString)/x.jsonl"
+        let primaryReq = "primary-req-\(UUID().uuidString)"
+        let dupReq = "dup-req-\(UUID().uuidString)"
+
+        // Match crier-emit's payload keys (agent, session_id, event,
+        // transcript_path, request_id) — anything missing here is a
+        // shape mismatch the server would silently fall through.
+        post("/event", body: [
+            "agent": "cursor", "event": "turn_done",
+            "session_id": "cursor-FIRST",
+            "transcript_path": tp,
+            "request_id": primaryReq,
+        ])
+        post("/event", body: [
+            "agent": "claude-code", "event": "turn_done",
+            "session_id": "claude-code-SECOND",
+            "transcript_path": tp,
+            "request_id": dupReq,
+        ])
+
+        // Subordinate's legacy /reply long-poll must short-circuit.
+        let started = Date()
+        guard let (_, resp) = get("/reply?request_id=\(dupReq)&wait=5", timeout: 6) else {
+            return XCTFail("no response from subordinate /reply")
+        }
+        let elapsed = Date().timeIntervalSince(started)
+        XCTAssertEqual(resp.statusCode, 204)
+        XCTAssertLessThan(elapsed, 1.0, "duplicate /reply should short-circuit instead of waiting wait=5")
+    }
+
     func testDedupFallsBackToSessionIdWhenNoTranscriptPath() {
         // Codex-style payload: no transcript_path, message comes via stdin.
         // Two events with the same session_id within the window should

@@ -15,7 +15,7 @@ import CrierEmitCore
 // reply was, and whether decision:block was emitted.
 func log(_ msg: String) {
     let path = (NSHomeDirectory() as NSString).appendingPathComponent(".claude/crier-emit.log")
-    let stamp = ISO8601DateFormatter().string(from: Date())
+    let stamp = CrierEmitCore.localISOTimestamp()
     let line = "[\(stamp)] [pid:\(getpid())] \(msg)\n"
     let data = line.data(using: .utf8) ?? Data()
     let url = URL(fileURLWithPath: path)
@@ -209,6 +209,13 @@ var payload: [String: Any] = [
     "pid": Int(ProcessInfo.processInfo.processIdentifier),
     "ts": ISO8601DateFormatter().string(from: Date()),
 ]
+// transcript_path is the dedup key for concurrent stop hooks (cursor's
+// + claude-code's both firing for one cursor turn produce identical
+// transcript paths). The server's EventDedup uses this to suppress the
+// duplicate broadcast.
+if let tp = stdinJSON["transcript_path"] as? String, !tp.isEmpty {
+    payload["transcript_path"] = tp
+}
 if let tmuxBlob = tmuxBlob { payload["tmux"] = tmuxBlob }
 if blockingEvent {
     // request_id is still useful for diagnostics on both paths even when

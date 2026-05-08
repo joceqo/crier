@@ -155,6 +155,18 @@ public enum CrierEmitCore {
         return best.count > 1 ? best : stdinCwd
     }
 
+    /// ISO 8601 timestamp in the user's local timezone, e.g.
+    /// `2026-05-08T11:02:17+02:00`. Preferred for human-readable log
+    /// lines so timestamps match wall-clock time the user sees on their
+    /// laptop. Wire formats (event payloads) can keep UTC for stability,
+    /// but this is shipped from CrierEmitCore so all three modules
+    /// (emit, server, UI) share one canonical helper.
+    public static func localISOTimestamp(_ date: Date = Date()) -> String {
+        let f = ISO8601DateFormatter()
+        f.timeZone = TimeZone.current
+        return f.string(from: date)
+    }
+
     public static let crierAgentDir = "/tmp/crier-agent"
 
     public static func disabledPath(forCwd cwd: String) -> String {

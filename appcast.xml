@@ -6,6 +6,21 @@
     <description>Sparkle appcast for Crier.app automatic updates.</description>
     <language>en</language>
     <item>
+      <title>0.8.1</title>
+      <link>https://github.com/joceqo/crier/releases/tag/v0.8.1</link>
+      <sparkle:version>0.8.1</sparkle:version>
+      <sparkle:shortVersionString>0.8.1</sparkle:shortVersionString>
+      <description><![CDATA[
+        <ul>
+          <li><strong>Dedup actually works now</strong>: 0.8.0 added the dedup logic but <code>crier-emit</code> wasn't sending <code>transcript_path</code> in its POST payload, so the server's key-match always missed. One overlay per cursor turn, instead of two — verified against a real cursor session.</li>
+          <li><strong>Logs in local time</strong>: every Crier log line now uses your timezone (e.g. <code>+02:00</code>) instead of UTC. Wall-clock timestamps match what Console / Finder show.</li>
+          <li>New regression test for the payload shape so the dedup field can't silently disappear again.</li>
+        </ul>
+      ]]></description>
+      <pubDate>Fri, 08 May 2026 09:15:00 +0000</pubDate>
+      <enclosure url="https://github.com/joceqo/crier/releases/download/v0.8.1/Crier.app.zip" length="4161531" type="application/octet-stream" sparkle:edSignature="dLSBOHnG/pKIHIy3n2UmSMKfT8qUK1hVTxGJtnzCWM0yXnZO6UvUZU7zdlpzK6N4madvHW+wMW5yZU1jyGB0DA==" sparkle:minimumSystemVersion="14.0" />
+    </item>
+    <item>
       <title>0.8.0</title>
       <link>https://github.com/joceqo/crier/releases/tag/v0.8.0</link>
       <sparkle:version>0.8.0</sparkle:version>

@@ -105,7 +105,7 @@ private func uiLogFilePath() -> String {
 @inline(__always)
 private func uiLog(_ msg: String) {
     let path = uiLogFilePath()
-    let stamp = ISO8601DateFormatter().string(from: Date())
+    let stamp = CrierEmitCore.localISOTimestamp()
     let line = "[\(stamp)] [pid:\(getpid())] \(msg)\n"
     let data = line.data(using: .utf8) ?? Data()
     let url = URL(fileURLWithPath: path)
@@ -1262,7 +1262,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private func startPause(until end: Date) {
         CrierEmitCore.setGlobalPause(until: end)
         schedulePauseEndTimer(until: end)
-        uiLog("pause set until \(ISO8601DateFormatter().string(from: end))")
+        uiLog("pause set until \(CrierEmitCore.localISOTimestamp(end))")
         state.removeAllSessions()
         hide()
         refreshStatusMenuState()
