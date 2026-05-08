@@ -51,6 +51,37 @@ func findAgentTerminalPID() -> Int32? {
     return nil
 }
 
+// True when `crier-emit claude-code` is firing as a side-effect of a
+// cursor-agent turn (cursor-agent forks claude internally, which trips
+// ~/.claude/settings.json's Stop hook alongside ~/.cursor/hooks.json's
+// own stop hook — both POST /event with the same transcript_path and
+// the server's first-wins dedup picks the wrong one ~50 % of the time,
+// so the UI shows the Claude icon for a Cursor turn). Stops at the
+// first `.app/Contents/MacOS/` boundary so running `claude` standalone
+// inside Cursor.app's terminal (no cursor-agent in the chain) keeps
+// publishing as claude-code.
+func isUnderCursorAgent() -> Bool {
+    var pid = getppid()
+    var hops = 0
+    while pid > 1, hops < 32 {
+        guard let comm = sh(["ps", "-p", "\(pid)", "-o", "comm="])?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !comm.isEmpty
+        else { return false }
+        if comm.contains(".app/Contents/MacOS/") { return false }
+        let basename = (comm as NSString).lastPathComponent
+        if basename == "cursor-agent" || basename.hasPrefix("cursor-agent") {
+            return true
+        }
+        guard let parentStr = sh(["ps", "-p", "\(pid)", "-o", "ppid="])?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              let parent = Int32(parentStr), parent > 1 else { return false }
+        pid = parent
+        hops += 1
+    }
+    return false
+}
+
 func sh(_ args: [String]) -> String? {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -92,6 +123,20 @@ guard args.count >= 3 else {
 }
 let agent = args[1]
 let event = args[2]
+
+// When cursor-agent runs, both ~/.cursor/hooks.json (cursor) and
+// ~/.claude/settings.json (claude-code) Stop hooks fire on the same
+// turn. The server dedups them by transcript_path (first wins), but
+// the race goes either way, so the UI's agent label / icon flickers
+// between Cursor and Claude. Suppress the claude-code arm here when
+// cursor-agent is actually our ancestor — only the cursor hook
+// publishes, dedup has nothing to race against, icon is always right.
+// Standalone Claude Code (no cursor-agent in the parent chain) is
+// untouched.
+if agent == "claude-code", isUnderCursorAgent() {
+    log("suppressed: claude-code hook fired under cursor-agent ancestor; cursor hook will publish")
+    exit(0)
+}
 
 let stdinData = FileHandle.standardInput.readDataToEndOfFile()
 let stdinJSON = (try? JSONSerialization.jsonObject(with: stdinData)) as? [String: Any] ?? [:]
@@ -349,6 +394,10 @@ if isCwdDisabled(cwd) {
 }
 if CrierEmitCore.isSessionDisabled(fullSessionId) {
     log("disabled flag present for session=\(fullSessionId) — skipping")
+    exit(0)
+}
+if CrierEmitCore.isSessionMuted(fullSessionId) {
+    log("muted flag active for session=\(fullSessionId) — skipping")
     exit(0)
 }
 

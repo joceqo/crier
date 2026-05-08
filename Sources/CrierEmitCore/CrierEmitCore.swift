@@ -311,6 +311,54 @@ public enum CrierEmitCore {
         try? FileManager.default.removeItem(atPath: sessionDisabledPath(forFullId: fullId))
     }
 
+    // MARK: - Per-session mute (timed)
+    //
+    // Timed sibling of disable. Where disable persists until manually
+    // cleared, mute auto-expires at a wall-clock deadline written into
+    // the flag file. crier-emit checks the deadline on every hook fire
+    // and treats expired files as cleared (and tidies them up so we
+    // don't leak entries forever).
+    //
+    // Storage: `/tmp/crier-agent/muted-session-<fullSessionId>`. File
+    // content is the unix epoch (seconds, integer) when the mute lifts.
+    // Same `<agent>-<rawSessionId>` scheme as the disable flag, so the
+    // per-tab kebab can scope mutes the same way it scopes disables.
+
+    public static func sessionMutedPath(forFullId id: String) -> String {
+        "\(crierAgentDir)/muted-session-\(id)"
+    }
+
+    public static func setSessionMuted(_ fullId: String, until: Date) {
+        try? FileManager.default.createDirectory(
+            atPath: crierAgentDir,
+            withIntermediateDirectories: true
+        )
+        let epoch = Int(until.timeIntervalSince1970)
+        let data = "\(epoch)\n".data(using: .utf8) ?? Data()
+        FileManager.default.createFile(atPath: sessionMutedPath(forFullId: fullId), contents: data)
+    }
+
+    public static func clearSessionMuted(_ fullId: String) {
+        try? FileManager.default.removeItem(atPath: sessionMutedPath(forFullId: fullId))
+    }
+
+    /// True iff a non-expired mute flag exists. Side-effect: deletes
+    /// the flag when its deadline has passed so future calls return
+    /// false without us having to garbage-collect from elsewhere.
+    public static func isSessionMuted(_ fullId: String) -> Bool {
+        let path = sessionMutedPath(forFullId: fullId)
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let s = String(data: data, encoding: .utf8)?
+                  .trimmingCharacters(in: .whitespacesAndNewlines),
+              let epoch = TimeInterval(s)
+        else { return false }
+        if Date(timeIntervalSince1970: epoch) <= Date() {
+            try? FileManager.default.removeItem(atPath: path)
+            return false
+        }
+        return true
+    }
+
     // MARK: - Summary affordance gating
     //
     // Pure-logic helpers used by the CrierUI overlay's "Summarize" chip.

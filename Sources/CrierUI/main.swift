@@ -675,6 +675,91 @@ struct Keycap: View {
     }
 }
 
+// Brand-icon styling helpers, lifted out of AgentBadge so the per-tab
+// chips in SessionTabStrip can render the same agent logo at small size
+// without duplicating the lookup tables. AgentBadge is no longer
+// rendered (CrierPanelView shows only the unified tab strip now), but
+// the type is kept for the helpers it consumes via these.
+enum AgentBrandStyle {
+    static func iconAssetName(for a: String) -> String {
+        switch a {
+        case "claude-code": return "claude"
+        case "codex":       return "codex-color"
+        case "cursor":      return "cursor"
+        case "opencode":    return "opencode"
+        default:            return ""
+        }
+    }
+    // Returns a tint color for monochrome (single-fill, currentColor) SVGs.
+    // Colored multi-fill SVGs return nil and render as-is.
+    static func monochromeTint(for asset: String) -> Color? {
+        switch asset {
+        case "claude": return Color(red: 0.85, green: 0.45, blue: 0.27)  // Anthropic brand orange
+        default:       return nil
+        }
+    }
+    static func initial(for a: String) -> String {
+        switch a {
+        case "claude-code": return "C"
+        case "codex":       return "X"
+        case "cursor":      return "U"
+        case "opencode":    return "O"
+        case "aider":       return "A"
+        default:            return String(a.first ?? "?").uppercased()
+        }
+    }
+    static func fallbackColors(for a: String) -> [Color] {
+        switch a {
+        case "claude-code": return [.orange, .red]
+        case "codex":       return [.green, .teal]
+        case "cursor":      return [.blue, .purple]
+        case "opencode":    return [.indigo, .blue]
+        case "aider":       return [.pink, .purple]
+        default:            return [.gray, .gray.opacity(0.6)]
+        }
+    }
+}
+
+// Brand icon view, sized by its container. Used by SessionTabStrip
+// (small, ~14pt) and by AgentBadge (legacy, 18pt) — keep behavior
+// identical so we can swap in either location without visual drift.
+struct AgentBrandIconView: View {
+    let agent: String
+    var body: some View {
+        let assetName = AgentBrandStyle.iconAssetName(for: agent)
+        if !assetName.isEmpty, let img = AgentBrandIcon.image(named: assetName) {
+            // Single-color SVGs (claude.svg) are loaded as template images
+            // so SwiftUI's foregroundStyle tints them. The colored ones
+            // (claudecode-color, codex-color, opencode) keep their own fill.
+            if let tint = AgentBrandStyle.monochromeTint(for: assetName) {
+                let templated: NSImage = {
+                    let copy = img.copy() as? NSImage ?? img
+                    copy.isTemplate = true
+                    return copy
+                }()
+                Image(nsImage: templated)
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundStyle(tint)
+            } else {
+                Image(nsImage: img)
+                    .resizable()
+                    .scaledToFit()
+            }
+        } else {
+            ZStack {
+                Circle().fill(LinearGradient(
+                    colors: AgentBrandStyle.fallbackColors(for: agent),
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing))
+                Text(AgentBrandStyle.initial(for: agent))
+                    .font(.system(size: 9, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+            }
+        }
+    }
+}
+
 // Top badge: brand icon (lobe-icons) + project title. Drag the title (or the
 // padded area beside it) to move the panel. The icon is the disable affordance:
 // hover morphs to X, click opens the "Disable Crier for this session?" dialog
@@ -682,6 +767,12 @@ struct Keycap: View {
 // "Dismiss" button / Esc in the input card. Clicks on the title area do
 // nothing — only drag-to-move — so users don't accidentally trigger the
 // dialog when reaching for the drag handle.
+//
+// NOTE: As of the unified-tab-strip refactor, AgentBadge is no longer
+// rendered. SessionTabStrip is the only project/agent surface in the
+// panel header now (the badge previously duplicated whichever session
+// was selected). Keeping the type around in case we need to revive the
+// "single-session, no strip" layout — delete on next pass if not used.
 struct AgentBadge: View {
     let agent: String
     let project: String
@@ -724,111 +815,168 @@ struct AgentBadge: View {
     }
 
     @ViewBuilder
-    private var agentIcon: some View {
-        let assetName = iconAssetName(for: agent)
-        if !assetName.isEmpty, let img = AgentBrandIcon.image(named: assetName) {
-            // Single-color SVGs (claude.svg) are loaded as template images
-            // so SwiftUI's foregroundStyle tints them. The colored ones
-            // (claudecode-color, codex-color, opencode) keep their own fill.
-            if let tint = monochromeTint(for: assetName) {
-                let templated: NSImage = {
-                    let copy = img.copy() as? NSImage ?? img
-                    copy.isTemplate = true
-                    return copy
-                }()
-                Image(nsImage: templated)
-                    .resizable()
-                    .scaledToFit()
-                    .foregroundStyle(tint)
-            } else {
-                Image(nsImage: img)
-                    .resizable()
-                    .scaledToFit()
-            }
-        } else {
-            ZStack {
-                Circle().fill(LinearGradient(
-                    colors: fallbackColors(for: agent),
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing))
-                Text(initial(for: agent))
-                    .font(.system(size: 11, weight: .bold, design: .rounded))
-                    .foregroundStyle(.white)
-            }
-        }
-    }
+    private var agentIcon: some View { AgentBrandIconView(agent: agent) }
+}
 
-    private func iconAssetName(for a: String) -> String {
-        switch a {
-        case "claude-code": return "claude"
-        case "codex":       return "codex-color"
-        case "cursor":      return "cursor"
-        case "opencode":    return "opencode"
-        default:            return ""
-        }
-    }
+/// Horizontal chips for parallel agent/sessions. Always rendered (even
+/// for a single session) — this is the panel's only project/agent
+/// surface now. Each chip carries: brand icon + project label + kebab
+/// (⋮) menu with per-session actions. Tap the label area to make
+/// that session active for Send / Cancel.
+///
+/// The strip is a plain HStack (not a ScrollView) so the
+/// `WindowDragRegion` background actually receives mouseDown events —
+/// NSScrollView consumes them for its own scroll-gesture pipeline,
+/// which broke panel-drag in the previous iteration. Trade-off: many
+/// chips can overflow the panel's 640pt width. With typical session
+/// counts (1–4) this hasn't come up; if it does, swap to a custom
+/// Layout that scrolls only on overflow rather than always.
+///
+/// Buttons and the kebab Menu sit in front of the drag region and
+/// absorb their own clicks — drag only fires on the gaps and the
+/// trailing Spacer.
+private struct SessionTabStrip: View {
+    @ObservedObject var state: CrierState
+    let onDisable: (CrierSession) -> Void
+    let onMute: (CrierSession, Int) -> Void
 
-    // Returns a tint color for monochrome (single-fill, currentColor) SVGs.
-    // Colored multi-fill SVGs return nil and render as-is.
-    private func monochromeTint(for asset: String) -> Color? {
-        switch asset {
-        case "claude": return Color(red: 0.85, green: 0.45, blue: 0.27)  // Anthropic brand orange
-        default:       return nil
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(state.sessions) { sess in
+                SessionTab(
+                    state: state,
+                    sess: sess,
+                    onDisable: onDisable,
+                    onMute: onMute
+                )
+            }
+            // Trailing flex space so even a single tab leaves a visible
+            // grab area for dragging the panel.
+            Spacer(minLength: 0)
         }
-    }
-    private func initial(for a: String) -> String {
-        switch a {
-        case "claude-code": return "C"
-        case "codex":       return "X"
-        case "cursor":      return "U"
-        case "opencode":    return "O"
-        case "aider":       return "A"
-        default:            return String(a.first ?? "?").uppercased()
-        }
-    }
-    private func fallbackColors(for a: String) -> [Color] {
-        switch a {
-        case "claude-code": return [.orange, .red]
-        case "codex":       return [.green, .teal]
-        case "cursor":      return [.blue, .purple]
-        case "opencode":    return [.indigo, .blue]
-        case "aider":       return [.pink, .purple]
-        default:            return [.gray, .gray.opacity(0.6)]
-        }
+        .background(WindowDragRegion())
     }
 }
 
-/// Horizontal chips to pick which parallel agent/session is active for Send / Cancel / Disable.
-private struct SessionTabStrip: View {
+private struct SessionTab: View {
     @ObservedObject var state: CrierState
+    let sess: CrierSession
+    let onDisable: (CrierSession) -> Void
+    let onMute: (CrierSession, Int) -> Void
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                ForEach(state.sessions) { sess in
-                    let selected = sess.id == state.selectedSessionKey
-                    Button {
-                        state.selectSession(id: sess.id)
-                    } label: {
-                        Text(sess.tabLabel)
-                            .font(.system(size: 11, weight: selected ? .semibold : .regular))
-                            .lineLimit(1)
-                            .foregroundStyle(.primary)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(
-                                selected ? Color.primary.opacity(0.12) : Color.clear,
-                                in: Capsule()
-                            )
-                            .overlay(
-                                Capsule()
-                                    .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                }
+        let selected = sess.id == state.selectedSessionKey
+        // Trim "Agent · " prefix from the chip label since the brand
+        // icon already carries that signal. Falls back to the raw
+        // label for unknown formats.
+        let label: String = {
+            if let dot = sess.tabLabel.range(of: " · ") {
+                return String(sess.tabLabel[dot.upperBound...])
             }
+            return sess.tabLabel
+        }()
+
+        HStack(spacing: 0) {
+            // Drag-or-tap region for the whole chip body (icon +
+            // label + their padding). Tap with no movement → select
+            // session; drag → move the panel. Replaces the previous
+            // Button(label) which absorbed mouseDown immediately and
+            // made the chip undraggable.
+            HStack(spacing: 6) {
+                AgentBrandIconView(agent: sess.agentName)
+                    .frame(width: 14, height: 14)
+                Text(label)
+                    .font(.system(size: 11, weight: selected ? .semibold : .regular))
+                    .lineLimit(1)
+                    .foregroundStyle(.primary)
+            }
+            .padding(.leading, 10)
+            .padding(.vertical, 5)
+            .padding(.trailing, 4)
+            .contentShape(Rectangle())
+            .background(WindowDragRegion(onTap: {
+                state.selectSession(id: sess.id)
+            }))
+
+            // Per-tab kebab menu. Three actions, all scoped to *this*
+            // tab without having to select it first:
+            //
+            //   • Disable — persistent until manually cleared. Writes
+            //     /tmp/crier-agent/disabled-session-<sid>; crier-emit
+            //     skips the panel pop on every future hook for this
+            //     session_id.
+            //   • Mute 10 min / 30 min — timed sibling. Writes
+            //     /tmp/crier-agent/muted-session-<sid> with the unix
+            //     epoch when the mute should lift. crier-emit reads
+            //     the deadline on every hook fire and treats expired
+            //     entries as cleared (it deletes them in passing).
+            //
+            // We chose the server-side-suppress design (gate at the
+            // crier-emit hook layer) over UI-side hide because:
+            //   • the panel never pops, so there's nothing to dismiss
+            //   • file-based state survives daemon / UI restarts
+            //   • mirrors the existing disable mechanism so there's
+            //     one mental model for "silenced session"
+            //   • zero daemon changes
+            // Trade-off: muted/disabled tabs are removed from the UI
+            // (matches existing disable behavior). To revive a muted
+            // session early, run `rm /tmp/crier-agent/muted-session-*`
+            // or wait it out — the next agent turn restores the tab.
+            Menu {
+                Button(role: .destructive) {
+                    onDisable(sess)
+                } label: {
+                    Label("Disable for this session",
+                          systemImage: "bell.slash")
+                }
+                Divider()
+                Button {
+                    onMute(sess, 10)
+                } label: {
+                    Label("Mute 10 min", systemImage: "moon.zzz")
+                }
+                Button {
+                    onMute(sess, 30)
+                } label: {
+                    Label("Mute 30 min", systemImage: "moon.zzz")
+                }
+            } label: {
+                // Unicode VERTICAL ELLIPSIS (U+22EE). Earlier we used
+                // SF Symbol `ellipsis` rotated 90°, but Menu's
+                // borderless label rendering ignored the rotation on
+                // macOS, leaving a horizontal "•••". Direct Text
+                // glyph is render-stable.
+                Text("\u{22EE}")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 12, height: 14)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .padding(.vertical, 5)
+            .padding(.trailing, 10)
+            .padding(.leading, 4)
         }
+        // Opaque, system-adaptive control colors — earlier iterations
+        // used `.quaternary` and primary-opacity fills, both of which
+        // let the panel's vibrancy material bleed through and looked
+        // washed-out against light desktops. `.controlColor` /
+        // `.selectedControlColor` give a clean "raised chip"
+        // appearance in both light and dark mode with zero
+        // transparency.
+        .background(
+            Capsule()
+                .fill(Color(nsColor: selected
+                    ? .selectedControlColor
+                    : .controlColor))
+        )
+        .overlay(
+            Capsule()
+                .strokeBorder(Color(nsColor: .separatorColor),
+                              lineWidth: 1)
+        )
     }
 }
 
@@ -875,6 +1023,10 @@ struct CrierPanelView: View {
     let onSubmit: () -> Void
     let onCancel: () -> Void
     let onDisableSession: () -> Void
+    // Kebab-menu actions — work on any session, not just the selected
+    // one. AppDelegate handles release-hook + remove-tab + hide-or-show.
+    let onSessionDisable: (CrierSession) -> Void
+    let onSessionMute: (CrierSession, Int) -> Void
     let onContentSize: (CGSize) -> Void
 
     private var selected: CrierSession? { state.selectedSession }
@@ -882,19 +1034,17 @@ struct CrierPanelView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                AgentBadge(
-                    agent: selected?.agentName ?? "claude-code",
-                    project: selected?.projectName ?? "",
-                    onClose: { state.showDisableDialog = true }
+                // Unified tab strip — every active session is a chip
+                // (brand icon + project + kebab). Replaces the older
+                // AgentBadge-plus-strip combo where the selected
+                // session was duplicated: once as a "current" badge
+                // and again inside the strip. Now there's one row,
+                // one chip per session, selection is purely visual.
+                SessionTabStrip(
+                    state: state,
+                    onDisable: onSessionDisable,
+                    onMute: onSessionMute
                 )
-                // Tab strip lives inline with the badge so a parallel
-                // session shows up as a chip *next to* the active session
-                // instead of taking a whole row above it. Hidden when
-                // there's only one session — the badge already names it.
-                if state.sessions.count > 1 {
-                    SessionTabStrip(state: state)
-                }
-                Spacer(minLength: 8)
                 if let kind = selected?.eventKind, !kind.isEmpty && kind != "turn_done" {
                     Text(kind)
                         .font(.system(size: 11, weight: .medium, design: .rounded))
@@ -1456,6 +1606,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             onSubmit: { [weak self] in self?.submit() },
             onCancel: { [weak self] in self?.cancel() },
             onDisableSession: { [weak self] in self?.confirmDisableSession() },
+            onSessionDisable: { [weak self] s in self?.disableSession(s) },
+            onSessionMute: { [weak self] s, mins in self?.muteSession(s, minutes: mins) },
             onContentSize: { [weak self] size in self?.applyContentSize(size) }
         )
         let hosting = NSHostingView(rootView: view)
@@ -1608,6 +1760,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     func hide() {
         panel.orderOut(nil)
+        // Reset the "user dragged it, leave it there" flag whenever the
+        // panel is fully put away. Without this, dragging the panel once
+        // in any session pins every future overlay (across different
+        // projects, different agents, hours later) to that position
+        // instead of recentering — even though the original drag intent
+        // ended when the user dismissed that session.
+        userPositionedPanel = false
     }
 
     // Esc / Dismiss: closes the current session tab. For the legacy
@@ -1641,18 +1800,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     // reply, removes the current session tab.
     func confirmDisableSession() {
         guard let s = state.selectedSession else { return }
-        // Per-conversation disable — does NOT silence other agents in the
-        // same project. Whole-project disable lives in `/crier off` and the
-        // Conversations window's per-cwd toggle.
-        CrierEmitCore.setSessionDisabled(s.id, cwd: s.cwd ?? "")
+        disableSession(s)
+    }
 
+    // Kebab-menu disable: works on *any* session, not just the selected
+    // one. Same flow as confirmDisableSession but takes the session
+    // explicitly so the strip can disable a non-active tab without
+    // first switching to it.
+    func disableSession(_ s: CrierSession) {
+        // Per-conversation disable — does NOT silence other agents in
+        // the same project. Whole-project disable lives in `/crier off`
+        // and the Conversations window's per-cwd toggle.
+        CrierEmitCore.setSessionDisabled(s.id, cwd: s.cwd ?? "")
+        finalizeKebabAction(s)
+    }
+
+    // Kebab-menu timed mute. Writes the muted-session-<id> flag with
+    // a deadline; crier-emit auto-clears it once the deadline passes.
+    func muteSession(_ s: CrierSession, minutes: Int) {
+        CrierEmitCore.setSessionMuted(
+            s.id,
+            until: Date().addingTimeInterval(TimeInterval(minutes * 60)))
+        finalizeKebabAction(s)
+    }
+
+    // Shared post-action: release the agent's blocking hook (empty
+    // reply for legacy long-poll, /reply/dismiss for the pre-queue
+    // claude-code path), drop the tab from state, and either hide the
+    // panel (no sessions left) or re-show it (other tabs remain).
+    // Without this step the muted/disabled session's hook would stay
+    // parked at the daemon's long-poll ceiling and freeze the agent's
+    // terminal until timeout.
+    private func finalizeKebabAction(_ s: CrierSession) {
         if s.replyChannel == "hook-stdout-queue" {
             postDismiss(sessionId: s.id)
         } else if let rid = s.requestId {
             postReply(body: ["request_id": rid, "text": ""])
         }
-        let sid = s.id
-        state.removeSession(id: sid)
+        state.removeSession(id: s.id)
         if state.sessions.isEmpty {
             hide()
         } else {
