@@ -57,18 +57,25 @@ struct MessageWithOptionalSummary: View {
             }
 
             if let s = summary, !s.isEmpty {
-                MessageCard(text: s)
-                    .overlay(alignment: .topLeading) {
-                        Text("Summary")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.primary)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 3)
-                            .background(.tertiary, in: Capsule())
-                            .padding(8)
-                    }
+                // Render the tag as a sibling above the card so it never
+                // overlaps the card's first line. Earlier overlay-based
+                // placement worked when the card had a margin but stopped
+                // working as the card layout tightened.
+                VStack(alignment: .leading, spacing: 4) {
+                    summaryBadge
+                    MessageCard(text: s)
+                }
             }
         }
+    }
+
+    private var summaryBadge: some View {
+        Text("Summary")
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(Color.primary.opacity(0.12), in: Capsule())
     }
 
     private var shouldOfferSummary: Bool {
@@ -100,7 +107,7 @@ struct MessageWithOptionalSummary: View {
                     .foregroundStyle(.primary)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
-                    .background(.tertiary, in: Capsule())
+                    .background(Color.primary.opacity(0.12), in: Capsule())
                 }
                 .buttonStyle(.plain)
             } else {
@@ -116,7 +123,7 @@ struct MessageWithOptionalSummary: View {
                     .foregroundStyle(.primary)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
-                    .background(.tertiary, in: Capsule())
+                    .background(Color.primary.opacity(0.12), in: Capsule())
                 }
                 .buttonStyle(.plain)
             }

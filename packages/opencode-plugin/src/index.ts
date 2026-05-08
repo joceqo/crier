@@ -1,6 +1,6 @@
 import type { Plugin } from "@opencode-ai/plugin"
-import { randomUUID } from "node:crypto"
-import { appendFileSync, mkdirSync } from "node:fs"
+import { createHash, randomUUID } from "node:crypto"
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
@@ -141,6 +141,48 @@ async function lastAssistantPlainText(
   return ""
 }
 
+// Crier silence flags live on disk so they survive daemon restarts and
+// work without the daemon running. The Swift `crier-emit` binary reads
+// the same files via CrierEmitCore.isGlobalSilenceActive() / isCwdDisabled
+// / isSessionDisabled — keeping this plugin's behavior aligned means the
+// menu-bar Pause and `/crier off` skill silence ALL agents, not just the
+// hook-based ones (Cursor, Claude Code, Codex).
+const CRIER_AGENT_DIR = "/tmp/crier-agent"
+
+function md5Hex(s: string): string {
+  return createHash("md5").update(s).digest("hex")
+}
+
+function isGloballyDisabled(): boolean {
+  return existsSync(join(CRIER_AGENT_DIR, "disabled-global"))
+}
+
+function isGlobalPauseActive(): boolean {
+  const p = join(CRIER_AGENT_DIR, "pause-until")
+  if (!existsSync(p)) return false
+  try {
+    const raw = readFileSync(p, "utf8").trim()
+    if (!raw) return false
+    const unix = Number(raw)
+    if (!Number.isFinite(unix)) return false
+    return unix * 1000 > Date.now()
+  } catch {
+    return false
+  }
+}
+
+function isGlobalSilenceActive(): boolean {
+  return isGloballyDisabled() || isGlobalPauseActive()
+}
+
+function isCwdDisabled(cwd: string): boolean {
+  return existsSync(join(CRIER_AGENT_DIR, `disabled-${md5Hex(cwd)}`))
+}
+
+function isSessionDisabled(fullId: string): boolean {
+  return existsSync(join(CRIER_AGENT_DIR, `disabled-session-${fullId}`))
+}
+
 function permissionSummary(e: any): string {
   const t = e.properties?.title
   return typeof t === "string" && t.trim().length > 0 ? t.trim() : "OpenCode needs your approval for a tool or action."
@@ -184,6 +226,25 @@ export const Crier: Plugin = async ({ directory, worktree, client }) => {
         return
       }
 
+      // Honor the same silence flags as crier-emit so menu-bar Pause /
+      // global Disable / per-cwd `/crier off` / per-session disable all
+      // apply to OpenCode events too. Until 0.8.1 these checks only
+      // existed on the Swift hook side, so paused users still saw
+      // OpenCode panels pop up.
+      const fullSessionId = `opencode-${sessionId}`
+      if (isGlobalSilenceActive()) {
+        log("global silence (disable or pause) — skipping", { type: e.type, sessionId })
+        return
+      }
+      if (directory && isCwdDisabled(directory)) {
+        log("cwd disabled — skipping", { type: e.type, cwd: directory })
+        return
+      }
+      if (isSessionDisabled(fullSessionId)) {
+        log("session disabled — skipping", { type: e.type, fullSessionId })
+        return
+      }
+
       log("event received", { type: e.type, kind, sessionId, requestId })
 
       let message = ""
@@ -207,7 +268,13 @@ export const Crier: Plugin = async ({ directory, worktree, client }) => {
             agent: "opencode",
             event: kind,
             request_id: requestId,
-            session_id: sessionId,
+            // Wire id is `<agent>-<rawId>` to match Swift's
+            // `crier-emit` and the `disabled-session-<fullId>` flag
+            // shape, so per-session disable from the badge X dialog
+            // applies to OpenCode the same way it does to Cursor /
+            // Claude / Codex. Raw `sessionId` is still used below for
+            // OpenCode SDK calls.
+            session_id: fullSessionId,
             cwd: directory,
             message,
             title: "OpenCode",

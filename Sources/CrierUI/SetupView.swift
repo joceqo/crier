@@ -105,11 +105,6 @@ struct SetupView: View {
             Divider()
 
             HStack {
-                Button("Install OpenCode plugin →") {
-                    NSWorkspace.shared.open(URL(string: "https://github.com/joceqo/crier#install-opencode-plugin")!)
-                }
-                .buttonStyle(.link)
-                .help("OpenCode integration is a separate npm-style plugin. Opens install instructions with a one-liner curl command.")
                 Spacer()
                 Button("Close") { onClose() }
                     .keyboardShortcut(.cancelAction)
@@ -196,6 +191,8 @@ private struct AgentRow: View {
             return "~/.cursor/hooks.json — stop, beforeShellExecution."
         case .codex:
             return "~/.codex/config.toml — [[hooks.Stop]] and [[hooks.PermissionRequest]] inside a managed CRIER block."
+        case .opencode:
+            return "~/.config/opencode/opencode.json — adds the bundled plugin's absolute path to the `plugin` array. Listens for session.idle and permission.asked."
         }
     }
 }

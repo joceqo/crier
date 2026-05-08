@@ -170,7 +170,10 @@ assert.ok(state.lastRequestId, "POST /event must have been made before hooks.eve
 state.fulfill(state.lastRequestId, "  user reply line  ")
 await promptAsyncSignal.promise
 
-assert.equal(state.lastEvent.session_id, "sess-turn-1")
+// Wire id is `opencode-<rawId>` so per-session disable flags
+// (`disabled-session-opencode-<rawId>`) match across crier-emit / UI.
+// session.promptAsync still uses the raw `sessionID` for OpenCode's API.
+assert.equal(state.lastEvent.session_id, "opencode-sess-turn-1")
 assert.equal(state.lastEvent.message, "Synthetic assistant text for smoke test")
 assert.equal(state.lastEvent.title, "OpenCode")
 assert.equal(record.promptAsync.length, 1)

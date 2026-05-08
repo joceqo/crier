@@ -28,6 +28,7 @@ enum Installer {
         case claudeCode = "Claude Code"
         case cursor     = "Cursor"
         case codex      = "Codex"
+        case opencode   = "OpenCode"
 
         var id: String { rawValue }
     }
@@ -84,6 +85,7 @@ enum Installer {
         case .claudeCode: return statusClaudeCode()
         case .cursor:     return statusCursor()
         case .codex:      return statusCodex()
+        case .opencode:   return statusOpenCode()
         }
     }
 
@@ -107,6 +109,7 @@ enum Installer {
         case .claudeCode: try installClaudeCode()
         case .cursor:     try installCursor()
         case .codex:      try installCodex()
+        case .opencode:   try installOpenCode()
         }
     }
 
@@ -417,6 +420,103 @@ enum Installer {
         var copy = s
         copy.removeSubrange(stripStart..<stripEnd)
         return copy
+    }
+
+    // MARK: - OpenCode
+    //
+    // Writes ~/.config/opencode/opencode.json. Unlike the other agents,
+    // OpenCode integration is a Node plugin (not a hook command) — but
+    // opencode resolves absolute paths in the `plugin` array directly,
+    // so we sidestep npm-link entirely and just point at the pre-built
+    // dist bundled inside Crier.app.
+
+    private static var opencodeConfigURL: URL {
+        URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(".config/opencode/opencode.json")
+    }
+
+    /// Path to the OpenCode plugin shipped inside Crier.app. Same App
+    /// Translocation guard as `emitBinaryURL()` — never write a /var/...
+    /// translocated path into opencode.json or the plugin breaks the
+    /// moment Crier quits.
+    static func opencodePluginEntryURL() -> URL? {
+        guard let resource = Bundle.main.resourceURL else { return nil }
+        let bundled = resource.appendingPathComponent("agent-assets/opencode-plugin/dist/index.js")
+        guard FileManager.default.fileExists(atPath: bundled.path) else { return nil }
+        if Self.isRunningFromAppTranslocation {
+            let appsBundle = URL(fileURLWithPath: "/Applications/Crier.app", isDirectory: true)
+            let appsEntry = appsBundle.appendingPathComponent(
+                "Contents/Resources/agent-assets/opencode-plugin/dist/index.js"
+            )
+            guard FileManager.default.fileExists(atPath: appsEntry.path),
+                  Self.bundleAtAppsMatchesRunningApp(appsBundle) else {
+                return nil
+            }
+            return appsEntry
+        }
+        return bundled
+    }
+
+    static func opencodePluginEntryPath() -> String {
+        opencodePluginEntryURL()?.path ?? ""
+    }
+
+    private static func statusOpenCode() -> InstallStatus {
+        // Hide the row entirely when this Crier build doesn't ship the
+        // plugin (e.g. ad-hoc dev build with `node` missing). The user
+        // can't act on a status they can't satisfy.
+        guard !opencodePluginEntryPath().isEmpty else { return .notDetected }
+
+        let detected = whichBinary("opencode") != nil
+            || FileManager.default.fileExists(atPath: opencodeConfigURL.deletingLastPathComponent().path)
+        guard detected else { return .notDetected }
+
+        guard let data = try? Data(contentsOf: opencodeConfigURL),
+              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return .detectedNotWired
+        }
+        let pluginEntries = (json["plugin"] as? [String]) ?? []
+        let crierEntries = pluginEntries.filter {
+            $0.contains("crier") && $0.hasSuffix("opencode-plugin/dist/index.js")
+        }
+        if crierEntries.isEmpty { return .detectedNotWired }
+        let entry = opencodePluginEntryPath()
+        return crierEntries.contains(entry) ? .wired : .wiredOtherPath
+    }
+
+    private static func installOpenCode() throws {
+        let entry = opencodePluginEntryPath()
+        guard !entry.isEmpty else {
+            if isRunningFromAppTranslocation {
+                throw InstallerError.copyToApplicationsBeforeHooks
+            }
+            throw InstallerError.bundledBinaryMissing
+        }
+
+        let url = opencodeConfigURL
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        var json: [String: Any] = [:]
+        if let data = try? Data(contentsOf: url),
+           let parsed = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            json = parsed
+            try backup(url)
+        }
+
+        let existing = (json["plugin"] as? [String]) ?? []
+        // Drop any prior Crier plugin path (different Crier.app install,
+        // npm-linked package name, or stale translocated path), then add
+        // the fresh absolute path. Other plugins the user has wired stay
+        // intact.
+        let filtered = existing.filter { p in
+            !(p.contains("crier") && p.hasSuffix("opencode-plugin/dist/index.js"))
+                && p != "@crier/opencode-plugin"
+        }
+        json["plugin"] = filtered + [entry]
+
+        try writeJSON(json, to: url)
     }
 
     // MARK: - Helpers

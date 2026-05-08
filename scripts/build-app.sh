@@ -69,6 +69,30 @@ cp "$REPO_DIR/assets/claude-skills/crier/SKILL.md" \
 cp "$REPO_DIR/assets/claude-commands/crier.md" \
    "$APP/Contents/Resources/agent-assets/claude-commands/crier.md"
 
+# Bundle the pre-built OpenCode plugin so the in-app Installer can wire
+# its absolute path into ~/.config/opencode/opencode.json — no npm-link
+# required, opencode resolves absolute paths directly. Build it if the
+# dist isn't present (clean checkout / fresh CI). Refuses if node/npm
+# aren't installed; the resulting bundle just won't ship the plugin.
+OPENCODE_PLUGIN_SRC="$REPO_DIR/packages/opencode-plugin"
+OPENCODE_PLUGIN_DIST="$OPENCODE_PLUGIN_SRC/dist/index.js"
+if [ ! -f "$OPENCODE_PLUGIN_DIST" ] && command -v npm >/dev/null && command -v node >/dev/null; then
+    echo "==> Building @crier/opencode-plugin (dist missing)"
+    ( cd "$OPENCODE_PLUGIN_SRC" && npm install --silent && npm run build --silent )
+fi
+if [ -f "$OPENCODE_PLUGIN_DIST" ]; then
+    mkdir -p "$APP/Contents/Resources/agent-assets/opencode-plugin/dist"
+    cp "$OPENCODE_PLUGIN_DIST" \
+       "$APP/Contents/Resources/agent-assets/opencode-plugin/dist/index.js"
+    if [ -f "$OPENCODE_PLUGIN_SRC/dist/index.d.ts" ]; then
+        cp "$OPENCODE_PLUGIN_SRC/dist/index.d.ts" \
+           "$APP/Contents/Resources/agent-assets/opencode-plugin/dist/index.d.ts"
+    fi
+    echo "==> Bundled OpenCode plugin"
+else
+    echo "==> WARN: OpenCode plugin dist missing — Setup window will hide OpenCode integration."
+fi
+
 # Generate AppIcon.icns from the SF Symbol "megaphone.fill" on a brand-orange
 # tile. make-icon.swift renders a Crier.iconset of PNGs at the required
 # sizes; iconutil packages it into the .icns macOS expects.
@@ -118,8 +142,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key>          <string>Crier</string>
   <key>CFBundleIconFile</key>            <string>AppIcon</string>
   <key>CFBundlePackageType</key>         <string>APPL</string>
-  <key>CFBundleVersion</key>             <string>0.8.1</string>
-  <key>CFBundleShortVersionString</key>  <string>0.8.1</string>
+  <key>CFBundleVersion</key>             <string>0.8.2</string>
+  <key>CFBundleShortVersionString</key>  <string>0.8.2</string>
   <key>LSMinimumSystemVersion</key>      <string>14.0</string>
   <key>LSUIElement</key>                 <true/>
   <key>NSHumanReadableCopyright</key>    <string>Crier — local agent overlay</string>

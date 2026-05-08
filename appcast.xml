@@ -6,6 +6,22 @@
     <description>Sparkle appcast for Crier.app automatic updates.</description>
     <language>en</language>
     <item>
+      <title>0.8.2</title>
+      <link>https://github.com/joceqo/crier/releases/tag/v0.8.2</link>
+      <sparkle:version>0.8.2</sparkle:version>
+      <sparkle:shortVersionString>0.8.2</sparkle:shortVersionString>
+      <description><![CDATA[
+        <ul>
+          <li><strong>OpenCode is now a first-class agent</strong>: bundled inside Crier.app, one-click install from the Setup window — no <code>npm</code>, <code>git</code>, or <code>opencode plugin</code> CLI dance. Just check the box and click Install Selected. The pre-built plugin lives at <code>/Applications/Crier.app/Contents/Resources/agent-assets/opencode-plugin/dist/index.js</code> and is wired into <code>~/.config/opencode/opencode.json</code> by absolute path.</li>
+          <li><strong>OpenCode now honors Pause / Disable</strong>: the plugin reads the same <code>/tmp/crier-agent/</code> silence flags as <code>crier-emit</code>, so menu-bar Pause and the <code>/crier off</code> skill silence OpenCode events too (previously they kept firing during a pause).</li>
+          <li><strong>Panel re-centers when content grows</strong>: longer assistant messages no longer push the overlay off-center toward the bottom of the screen if you haven't dragged it.</li>
+          <li><strong>"Summary" tag</strong> sits above the summary card now instead of overlapping its first line; the <strong>Summarize</strong> button uses a solid fill so it stays readable on translucent backgrounds.</li>
+        </ul>
+      ]]></description>
+      <pubDate>Fri, 08 May 2026 09:55:00 +0000</pubDate>
+      <enclosure url="https://github.com/joceqo/crier/releases/download/v0.8.2/Crier.app.zip" length="4169222" type="application/octet-stream" sparkle:edSignature="XxlUbLdjaIQ+5iwXNK0Z+mJJvFph6UkxZNR0bNBjDtw/y7znIhhNrJOQZSYqL+RtBkfcuhjIA7Pwl5pqw4eGCA==" sparkle:minimumSystemVersion="14.0" />
+    </item>
+    <item>
       <title>0.8.1</title>
       <link>https://github.com/joceqo/crier/releases/tag/v0.8.1</link>
       <sparkle:version>0.8.1</sparkle:version>

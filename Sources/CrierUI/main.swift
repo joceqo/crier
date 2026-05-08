@@ -1573,6 +1573,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         programmaticPanelGeometry = true
         defer { programmaticPanelGeometry = false }
         panel.setContentSize(newSize)
+        // setContentSize keeps origin.y fixed (anchored at the bottom
+        // edge), so a panel that started centered drifts off-center as
+        // the height grows turn over turn. If the user hasn't dragged the
+        // panel themselves, re-center against the new size.
+        if !userPositionedPanel {
+            positionPanelCentered()
+        }
     }
 
     func showPanel() {
