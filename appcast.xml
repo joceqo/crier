@@ -6,6 +6,23 @@
     <description>Sparkle appcast for Crier.app automatic updates.</description>
     <language>en</language>
     <item>
+      <title>0.8.8</title>
+      <link>https://github.com/joceqo/crier/releases/tag/v0.8.8</link>
+      <sparkle:version>0.8.8</sparkle:version>
+      <sparkle:shortVersionString>0.8.8</sparkle:shortVersionString>
+      <description><![CDATA[
+        <ul>
+          <li><strong>Cursor reply delivery actually works.</strong> Cursor's <code>stop</code> hook accepts <code>{"followup_message": "&lt;text&gt;"}</code>, not Claude Code's <code>{"decision":"block","reason":"…"}</code>. We were emitting decision:block for cursor — it was silently ignored, the user's typed reply never reached the agent's transcript. Now branched per agent (<code>cursor</code> → followup_message; claude-code / codex / opencode keep decision:block) with an integration test that explicitly forbids the regression.</li>
+          <li><strong>Cmd+Q quits, Cmd+W closes the current tab</strong> from anywhere in the panel. App-level <code>NSEvent.addLocalMonitorForEvents</code> intercepts before responder dispatch, so it works no matter which view inside the panel has focus (the message scroll area's NSTextView or the reply field) — and even though the panel is <code>.nonactivatingPanel</code>, where main-menu shortcuts wouldn't fire because the app isn't active. Cmd+W with no tabs hides the panel.</li>
+          <li><strong>Real text selection in the message card.</strong> Replaced the SwiftUI <code>MarkdownContent</code> tree (each <code>Text</code> had its own <code>.textSelection</code> scope, Cmd+A was a no-op) with a single NSTextView wrapped in <code>NSViewRepresentable</code>. Cmd+A across the whole message, drag-select arbitrary ranges, Cmd+C copy. Trade-off: code blocks now have rectangular paragraph backgrounds instead of rounded clip-shapes — NSAttributedString can't paint clip-shaped corners. Syntax highlighting is preserved (the existing-but-dormant <code>applyToLikelySwiftCodeBlocks</code> walker is wired in).</li>
+          <li><strong>Empty cursor tabs recovered.</strong> Cursor's <code>beforeShellExecution</code> hook stdin sometimes omits <code>transcript_path</code>; without it crier-emit posted events with an empty <code>message</code> and the panel showed a tab with no content. New <code>findCursorTranscriptPath(sessionId:)</code> walks <code>~/.cursor/projects/*/agent-transcripts/&lt;sid&gt;/&lt;sid&gt;.jsonl</code> as a fallback (session_ids are UUIDs, first match wins — no need to know Cursor's cwd encoding). The recovered path also propagates into the event payload so the server's <code>EventDedup</code> still works against concurrent claude-code Stop hooks on the same transcript.</li>
+          <li><strong>Pause / Disable Crier no longer races against in-flight events.</strong> The hook-side <code>isGlobalSilenceActive()</code> guard skips new firings, but events posted to the daemon milliseconds before the file was written still rode the long-poll out to the UI and re-popped the panel right after <code>startPause()</code> hid it. <code>handleEvent</code> now also checks <code>isGlobalSilenceActive()</code> and drops non-dismiss events when silence is active. dismiss still passes through so per-session cleanup still happens.</li>
+        </ul>
+      ]]></description>
+      <pubDate>Sat, 09 May 2026 10:50:00 +0000</pubDate>
+      <enclosure url="https://github.com/joceqo/crier/releases/download/v0.8.8/Crier.app.zip" length="4154315" type="application/octet-stream" sparkle:edSignature="WeDhGovaF/Ctve68ij3KxUFfjFFDOcdF4gdlaIWAim45DFVQNnlFtoErWp/9dSwQGQ+PLVNXRZE9dqNZjKE/Bw==" sparkle:minimumSystemVersion="14.0" />
+    </item>
+    <item>
       <title>0.8.7</title>
       <link>https://github.com/joceqo/crier/releases/tag/v0.8.7</link>
       <sparkle:version>0.8.7</sparkle:version>
