@@ -288,9 +288,16 @@ final class CrierEmitIntegrationTests: XCTestCase {
         XCTAssertEqual(event["event"] as? String, "needs_permission")
     }
 
-/// Same reply/decision:block path as Claude; Cursor `stop` hook uses the first arg `cursor`.
-    func testEmitCursorTurnDoneDeliversReplyViaHookStdout() throws {
-        try runHookStdoutReplyRoundTrip(agent: "cursor", replyText: "two")
+/// Cursor's `stop` hook uses a different stdout schema than Claude Code:
+    /// `{"followup_message": "<text>"}`, which Cursor auto-submits as the
+    /// next user message (see cursor.com/docs/hooks). decision:block is
+    /// silently ignored — the regression we hit on 2026-05-09.
+    func testEmitCursorTurnDoneDeliversReplyViaFollowupMessage() throws {
+        try runHookStdoutReplyRoundTrip(
+            agent: "cursor",
+            replyText: "two",
+            replyFormat: .followupMessage
+        )
     }
 
     /// Claude Code reply round-trip via the pre-queue path (see
@@ -326,17 +333,24 @@ final class CrierEmitIntegrationTests: XCTestCase {
         try runHookStdoutReplyRoundTrip(agent: "opencode", replyText: "opencode-reply")
     }
 
+    /// Two stdout shapes share this test scaffolding:
+    ///   • `.decisionBlock` — Claude Code / Codex / OpenCode use
+    ///     `{"decision":"block","reason":"…<reply>…"}`
+    ///   • `.followupMessage` — Cursor uses `{"followup_message":"<reply>"}`
+    enum ReplyFormat { case decisionBlock, followupMessage }
+
     /// Drives the full hook-stdout reply round-trip for an agent:
     ///   1. spawn crier-emit; it POSTs an event with a request_id and blocks
     ///      on /reply long-poll
     ///   2. test reads the request_id off the event
     ///   3. test POSTs /reply (mimicking what the UI does on submit)
-    ///   4. crier-emit unblocks and prints `{"decision":"block","reason":...}`
-    ///   5. assert the reply text round-tripped into the decision JSON
+    ///   4. crier-emit unblocks and prints the agent-appropriate stdout JSON
+    ///   5. assert the reply text round-tripped into the right field
     private func runHookStdoutReplyRoundTrip(
         agent: String,
         replyText: String,
-        stdinPayload: [String: Any]? = nil
+        stdinPayload: [String: Any]? = nil,
+        replyFormat: ReplyFormat = .decisionBlock
     ) throws {
         guard !Self.emitBinaryPath.isEmpty else { throw XCTSkip("crier-emit binary not built") }
 
@@ -390,9 +404,16 @@ final class CrierEmitIntegrationTests: XCTestCase {
 
         _ = emitSem.wait(timeout: .now() + 10)
         let parsed = (try? JSONSerialization.jsonObject(with: Data(emitOutput.utf8))) as? [String: Any]
-        XCTAssertEqual(parsed?["decision"] as? String, "block", "[\(agent)] expected decision:block")
-        let reason = parsed?["reason"] as? String ?? ""
-        XCTAssertTrue(reason.contains(replyText), "[\(agent)] reason should contain the reply text, got: \(reason)")
+        switch replyFormat {
+        case .decisionBlock:
+            XCTAssertEqual(parsed?["decision"] as? String, "block", "[\(agent)] expected decision:block")
+            let reason = parsed?["reason"] as? String ?? ""
+            XCTAssertTrue(reason.contains(replyText), "[\(agent)] reason should contain the reply text, got: \(reason)")
+        case .followupMessage:
+            XCTAssertNil(parsed?["decision"], "[\(agent)] cursor stop hook must not emit decision:block — Cursor ignores it")
+            XCTAssertEqual(parsed?["followup_message"] as? String, replyText,
+                           "[\(agent)] expected followup_message to contain the raw reply text")
+        }
     }
 
     /// **The "Send from UI doesn't work" regression guard.**

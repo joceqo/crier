@@ -169,11 +169,32 @@ if let pane = env["TMUX_PANE"], !pane.isEmpty {
     tmuxBlob = ["pane_id": pane, "target": target]
 }
 
+// Cursor's beforeShellExecution stdin sometimes omits transcript_path.
+// session_id is consistently present, so fall back to walking
+// ~/.cursor/projects/*/agent-transcripts/<sid>/<sid>.jsonl when the
+// primary key is missing. Empty cursor tabs in the panel were the
+// user-visible symptom of the omission (no message text extracted).
+// Declared at file scope so the payload builder below also picks up the
+// recovered path (the server's EventDedup keys on transcript_path).
+var resolvedTranscriptPath = (stdinJSON["transcript_path"] as? String).flatMap {
+    $0.isEmpty ? nil : $0
+}
+var resolvedTranscriptPathRecovered = false
+if resolvedTranscriptPath == nil, agent == "cursor",
+   let recovered = CrierEmitCore.findCursorTranscriptPath(sessionId: sessionIdRaw) {
+    resolvedTranscriptPath = recovered
+    resolvedTranscriptPathRecovered = true
+}
+
 var lastMessage = ""
 switch agent {
 case "claude-code", "cursor", "opencode":
-    if let p = stdinJSON["transcript_path"] as? String, !p.isEmpty {
-        log("transcript_path=\(p)")
+    if let p = resolvedTranscriptPath {
+        if resolvedTranscriptPathRecovered {
+            log("transcript_path=\(p) (recovered via session_id; stdin omitted it)")
+        } else {
+            log("transcript_path=\(p)")
+        }
         // Log file size + last few non-empty lines to debug stale-message bugs.
         if let raw = try? String(contentsOf: URL(fileURLWithPath: p), encoding: .utf8) {
             let lines = raw.split(separator: "\n", omittingEmptySubsequences: true)
@@ -257,8 +278,10 @@ var payload: [String: Any] = [
 // transcript_path is the dedup key for concurrent stop hooks (cursor's
 // + claude-code's both firing for one cursor turn produce identical
 // transcript paths). The server's EventDedup uses this to suppress the
-// duplicate broadcast.
-if let tp = stdinJSON["transcript_path"] as? String, !tp.isEmpty {
+// duplicate broadcast. Forward the *resolved* path (recovered if stdin
+// omitted it) so dedup still works for cursor's beforeShellExecution
+// fallbacks.
+if let tp = resolvedTranscriptPath, !tp.isEmpty {
     payload["transcript_path"] = tp
 }
 if let tmuxBlob = tmuxBlob { payload["tmux"] = tmuxBlob }
@@ -490,21 +513,43 @@ if blockingEvent {
     log("reply from overlay: \(String(replyText?.prefix(80) ?? "nil"))")
 
     if let reply = replyText, !reply.isEmpty {
-        // Wrap the user's text so Claude treats it as the next user message
-        // rather than as out-of-band hook info. Without the framing, Claude
-        // tends to respond with "Acknowledged — received via Stop hook" or
-        // similar meta-acknowledgement instead of actually answering the
-        // message. The XML-ish tags mirror Claude's own formatting habits.
-        let phrasedReason = """
-        The user replied via the Crier overlay. Treat the contents of the \
-        <user_message> tag below as their next message and respond to it \
-        directly — do not acknowledge that it came from a hook.
+        // Two stop-hook protocols, picked by agent:
+        //
+        //   • Cursor → {"followup_message": "<text>"}. Documented at
+        //     cursor.com/docs/hooks: when non-empty, Cursor "automatically
+        //     submits it as the next user message". Raw text — Cursor treats
+        //     the whole field as the user's input verbatim, so no XML
+        //     framing is needed (or wanted; it would surface to the model).
+        //     Subject to `loop_limit` (default 5 auto follow-ups per script).
+        //
+        //   • Claude Code (and others sharing its protocol) → decision:block
+        //     with an XML-wrapped reason. Without the framing Claude tends
+        //     to reply "Acknowledged — received via Stop hook" instead of
+        //     actually answering the message; the <user_message> tags
+        //     mirror Claude's own formatting habits and reliably make it
+        //     treat the content as the next user prompt.
+        //
+        // Until 2026-05-09 cursor was wired through the decision:block
+        // path on the README's untested-claim that Cursor "loads Claude
+        // Code's hook config". It does not for `stop` — the reply silently
+        // disappeared and the user typed their message again in the TUI.
+        // Verified by reading ~/.cursor/skills-cursor/create-hook/SKILL.md
+        // (Event Output Cheat Sheet) and cursor.com/docs/hooks.
+        let out: [String: Any]
+        if agent == "cursor" {
+            out = ["followup_message": reply]
+        } else {
+            let phrasedReason = """
+            The user replied via the Crier overlay. Treat the contents of the \
+            <user_message> tag below as their next message and respond to it \
+            directly — do not acknowledge that it came from a hook.
 
-        <user_message>
-        \(reply)
-        </user_message>
-        """
-        let out: [String: Any] = ["decision": "block", "reason": phrasedReason]
+            <user_message>
+            \(reply)
+            </user_message>
+            """
+            out = ["decision": "block", "reason": phrasedReason]
+        }
         if let data = try? JSONSerialization.data(withJSONObject: out),
            let s = String(data: data, encoding: .utf8) {
             // FileHandle.write goes straight to fd 1 — bypasses any
@@ -513,10 +558,10 @@ if blockingEvent {
             FileHandle.standardOutput.write(Data((s + "\n").utf8))
             log("wrote stdout: \(s)")
         } else {
-            log("ERROR: failed to serialize decision:block JSON")
+            log("ERROR: failed to serialize stop-hook JSON")
         }
     } else {
-        log("overlay and terminal both timed out — exiting without decision:block")
+        log("overlay and terminal both timed out — exiting without reply JSON")
     }
 }
 log("exit 0")

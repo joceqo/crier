@@ -987,12 +987,13 @@ private struct SessionTab: View {
     }
 }
 
-/// Renders the agent's last assistant message as a SwiftUI view tree
-/// via `MarkdownContent`. Replaces the previous NSTextView pipeline
-/// (NSAttributedString + NSTextBlock) so we can put real SwiftUI
-/// `.background` + `.clipShape(RoundedRectangle)` on per-block code
-/// containers — something NSAttributedString's per-glyph attributes
-/// could only approximate as rectangles.
+/// Renders the agent's last assistant message via
+/// `SelectableMarkdownView` — an NSTextView wrapped in
+/// NSViewRepresentable. We swung back from the SwiftUI MarkdownContent
+/// tree because per-paragraph `Text` views couldn't expose Cmd+A /
+/// drag-select across the whole message; trade-off is rectangular
+/// (not rounded) code-block backgrounds, which NSAttributedString
+/// can't clip-shape.
 ///
 /// Sizing: the inner ScrollView lets the message area scroll
 /// vertically when the panel hits its 720 pt height ceiling
@@ -1004,7 +1005,7 @@ struct MessageCard: View {
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: true) {
-            MarkdownContent(markdown: text)
+            SelectableMarkdownView(markdown: text)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 14)
         }
@@ -1207,6 +1208,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         userDriverDelegate: nil
     )
     var panel: NSPanel!
+    /// Local NSEvent monitor for Cmd+Q / Cmd+W. Lives at the app level
+    /// (not a SwiftUI `.keyboardShortcut`) because the panel is a
+    /// `.nonactivatingPanel` and embedded NSTextViews (the message
+    /// scroll area, the reply field) consume keyDown events before the
+    /// SwiftUI shortcut binding sees them — and the main menu's Quit
+    /// item won't fire when Crier isn't the active app. A local event
+    /// monitor runs before responder dispatch, so neither matters.
+    private var localKeyMonitor: Any?
     var subscriberTask: Task<Void, Never>?
     var lastTerminalApp: NSRunningApplication?
     var statusItem: NSStatusItem?
@@ -1236,8 +1245,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
         // App menu (required even if empty — system uses it for the app name
         // pseudo-header on the menu bar even though we're an accessory).
+        // Quit lives here so Cmd+Q routes via the responder chain whenever
+        // any Crier window (panel, Conversations, Setup) is key — the
+        // status-item Quit only fires while the menu-bar dropdown is open.
         let appItem = NSMenuItem()
-        appItem.submenu = NSMenu()
+        let appMenu = NSMenu()
+        appMenu.addItem(
+            withTitle: "Quit Crier",
+            action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: "q"
+        )
+        appItem.submenu = appMenu
         mainMenu.addItem(appItem)
 
         let editItem = NSMenuItem()
@@ -1596,6 +1614,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    /// Cmd+Q quits Crier; Cmd+W closes the current tab when the panel is
+    /// key (and hides the panel when the last tab goes). See `panel`'s
+    /// doc comment for why a local NSEvent monitor — not a SwiftUI
+    /// shortcut or main-menu item — is the right hook.
+    private func installShortcutMonitor() {
+        localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            guard mods == .command, let chars = event.charactersIgnoringModifiers else { return event }
+            switch chars {
+            case "q":
+                NSApp.terminate(nil)
+                return nil
+            case "w":
+                if NSApp.keyWindow === self.panel {
+                    self.cancel()
+                    return nil
+                }
+                return event
+            default:
+                return event
+            }
+        }
+    }
+
     /// If `pause-until` was written before the last quit (or another tool set it), arm the expiry timer again.
     private func resyncPauseTimerFromDisk() {
         guard let end = CrierEmitCore.globalPauseExpiry() else { return }
@@ -1607,6 +1650,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         installMainMenu()
         _ = updaterController
         installStatusItem()
+        installShortcutMonitor()
         resyncPauseTimerFromDisk()
         let view = CrierPanelView(
             state: state,
@@ -1928,6 +1972,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let agent = obj["agent"] as? String ?? "?"
         let cwd = obj["cwd"] as? String ?? "?"
         uiLog("handleEvent — kind=\(kind) agent=\(agent) message=\(messageLen)chars cwd=\(cwd)")
+        // dismiss always passes through so per-session cleanup happens
+        // even while the user has things paused or disabled (the agent
+        // moved on; we should drop the matching tab regardless).
         if kind == "dismiss" {
             if let sid = obj["session_id"] as? String, !sid.isEmpty {
                 state.removeSession(id: sid)
@@ -1939,6 +1986,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             } else {
                 showPanel()
             }
+            return
+        }
+
+        // Defence in depth against the hook→daemon→UI race during
+        // global silence: crier-emit's `isGlobalSilenceActive()` guard
+        // skips *new* hook firings, but events posted to the daemon
+        // milliseconds before Pause / Disable was set still ride the
+        // long-poll out to us. Without this gate the panel pops back
+        // up the instant after `startPause()` calls `hide()`, which
+        // is exactly what the user reported on 2026-05-09.
+        if CrierEmitCore.isGlobalSilenceActive() {
+            uiLog("event dropped — global silence active (kind=\(kind))")
             return
         }
 

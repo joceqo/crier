@@ -382,6 +382,84 @@ final class CrierEmitCoreTests: XCTestCase {
         XCTAssertEqual(recovered, configDir)
     }
 
+    // MARK: - findCursorTranscriptPath
+    //
+    // Cursor's beforeShellExecution stdin sometimes omits transcript_path
+    // (causes empty cursor tabs in the panel — no message text extracted).
+    // Recovery walks ~/.cursor/projects/*/agent-transcripts/<sid>/<sid>.jsonl;
+    // session_ids are UUIDs, globally unique, so first hit wins.
+
+    private func makeFakeHomeWithCursorTranscripts(
+        projectsAndSessions: [(project: String, sessions: [String])]
+    ) -> (home: String, cleanup: () -> Void) {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("crier-cursor-tx-\(UUID().uuidString)")
+            .standardizedFileURL
+        let home = base.path
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        let projectsDir = (home as NSString).appendingPathComponent(".cursor/projects")
+        try? FileManager.default.createDirectory(atPath: projectsDir, withIntermediateDirectories: true)
+        for (project, sessions) in projectsAndSessions {
+            for sid in sessions {
+                let dir = "\(projectsDir)/\(project)/agent-transcripts/\(sid)"
+                try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+                let file = "\(dir)/\(sid).jsonl"
+                FileManager.default.createFile(atPath: file, contents: Data("{}\n".utf8))
+            }
+        }
+        return (home, { try? FileManager.default.removeItem(at: base) })
+    }
+
+    func testFindCursorTranscriptPathLocatesByGlobWithoutKnowingCwdEncoding() {
+        let sid = "7a2ac714-eb64-4714-bd1b-9f2a6c557686"
+        let (home, cleanup) = makeFakeHomeWithCursorTranscripts(projectsAndSessions: [
+            ("Users-joce-Desktop-coding-mochi", [sid])
+        ])
+        defer { cleanup() }
+        let recovered = CrierEmitCore.findCursorTranscriptPath(sessionId: sid, home: home)
+        XCTAssertEqual(
+            recovered,
+            "\(home)/.cursor/projects/Users-joce-Desktop-coding-mochi/agent-transcripts/\(sid)/\(sid).jsonl"
+        )
+    }
+
+    func testFindCursorTranscriptPathFindsCorrectProjectAmongMultiple() {
+        let sid = "session-A"
+        let (home, cleanup) = makeFakeHomeWithCursorTranscripts(projectsAndSessions: [
+            ("project-foo", ["session-other"]),
+            ("project-bar", [sid]),
+            ("project-baz", []),
+        ])
+        defer { cleanup() }
+        let recovered = CrierEmitCore.findCursorTranscriptPath(sessionId: sid, home: home)
+        XCTAssertNotNil(recovered)
+        XCTAssertTrue(recovered!.contains("/project-bar/"),
+                      "expected project-bar path, got \(recovered ?? "nil")")
+    }
+
+    func testFindCursorTranscriptPathReturnsNilWhenSessionAbsent() {
+        let (home, cleanup) = makeFakeHomeWithCursorTranscripts(projectsAndSessions: [
+            ("project-foo", ["other-session"])
+        ])
+        defer { cleanup() }
+        XCTAssertNil(CrierEmitCore.findCursorTranscriptPath(sessionId: "missing", home: home))
+    }
+
+    func testFindCursorTranscriptPathReturnsNilWhenEmptySessionId() {
+        let (home, cleanup) = makeFakeHomeWithCursorTranscripts(projectsAndSessions: [])
+        defer { cleanup() }
+        XCTAssertNil(CrierEmitCore.findCursorTranscriptPath(sessionId: "", home: home))
+    }
+
+    func testFindCursorTranscriptPathReturnsNilWhenProjectsDirMissing() {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("crier-cursor-tx-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        // No ~/.cursor/projects in this fake home.
+        XCTAssertNil(CrierEmitCore.findCursorTranscriptPath(sessionId: "any", home: base.path))
+    }
+
     func testIsGloballyDisabledReturnsFalseWhenFlagAbsent() {
         // The flag path should not exist in a clean test environment.
         let flagPath = CrierEmitCore.globalDisabledPath

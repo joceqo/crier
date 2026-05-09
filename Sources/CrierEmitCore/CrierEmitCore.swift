@@ -155,6 +155,43 @@ public enum CrierEmitCore {
         return best.count > 1 ? best : stdinCwd
     }
 
+    /// Cursor's `beforeShellExecution` hook stdin sometimes omits
+    /// `transcript_path` (observed empirically — schema isn't documented
+    /// and seems to vary by command/agent context). When that happens
+    /// we still get `session_id`; the transcript file lives at a
+    /// deterministic path:
+    ///
+    ///   ~/.cursor/projects/<encoded-cwd>/agent-transcripts/<sid>/<sid>.jsonl
+    ///
+    /// Rather than reverse-engineering Cursor's cwd encoding rules
+    /// (different from claude-code's), walk every project dir under
+    /// `~/.cursor/projects/` and return the first that contains a
+    /// transcript matching `sessionId`. Cursor session_ids are UUIDs,
+    /// globally unique, so the first hit is correct. Returns `nil` when
+    /// no match exists — caller should treat as "no transcript known".
+    ///
+    /// `home` and `fileManager` are injectable for unit testing.
+    public static func findCursorTranscriptPath(
+        sessionId: String,
+        home: String = NSHomeDirectory(),
+        fileManager: FileManager = .default
+    ) -> String? {
+        guard !sessionId.isEmpty else { return nil }
+        let projectsDir = (home as NSString).appendingPathComponent(".cursor/projects")
+        guard let projectDirs = try? fileManager.contentsOfDirectory(atPath: projectsDir) else {
+            return nil
+        }
+        for projectDir in projectDirs {
+            let candidate = (projectsDir as NSString)
+                .appendingPathComponent(projectDir)
+                .appending("/agent-transcripts/\(sessionId)/\(sessionId).jsonl")
+            if fileManager.fileExists(atPath: candidate) {
+                return candidate
+            }
+        }
+        return nil
+    }
+
     /// ISO 8601 timestamp in the user's local timezone, e.g.
     /// `2026-05-08T11:02:17+02:00`. Preferred for human-readable log
     /// lines so timestamps match wall-clock time the user sees on their
