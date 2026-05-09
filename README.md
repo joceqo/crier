@@ -70,7 +70,7 @@ swift test                                       # Swift unit tests
 | Provider | State | Next validation |
 | --- | --- | --- |
 | Claude Code | Manually tested end-to-end with `Stop` → Crier panel → reply via hook stdout. | Add more regression fixtures from real Claude transcripts. |
-| Codex CLI | Adapter path implemented for `last_assistant_message`, not yet manually validated. | Install hooks with `codex_hooks = true`, verify `Stop` and `PermissionRequest` payloads. |
+| Codex CLI | Adapter path implemented for `last_assistant_message`, not yet manually validated. | Install hooks with the feature key reported by `codex features list` (`hooks = true` on current Codex), verify `Stop` and `PermissionRequest` payloads. |
 | Cursor CLI | Shares transcript parsing with Claude/Codex-style hooks, not yet manually validated. | Verify actual `stop` payload shape and permission hook behavior. |
 | OpenCode | Plugin posts, long-polls `/reply`, then calls `session.promptAsync` (idle) or the permissions endpoint (tool approval). | Exercise with real projects; tighten permission text→`once`/`always`/`reject` mapping if needed. |
 | Aider / Gemini / generic PTY | Planned only. `crier-wrap` is still a stub. | Implement PTY wrapper, idle detection, scrollback extraction, and named-pipe reply delivery. |
@@ -94,7 +94,7 @@ Crier keeps the **idea** (hook → floating window → reply travels back to the
 | Agent                                | Native hook surface                                                                                                                                                                                                                                                                                                        | What we use                                                                                  | Notes                                                                                                                                                                                                                                                |
 | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Claude Code**                      | Rich. `Stop`, `SubagentStop`, `Notification`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SessionStart`, `SessionEnd`, `PreCompact` via `~/.claude/settings.json`                                                                                                                                                    | `Stop` (turn finished) + `Notification` (waiting for permission)                             | Reference implementation. Hook scripts receive JSON on stdin (session id, transcript path, last message).                                                                                                                                            |
-| **OpenAI Codex CLI**                 | Rich, behind feature flag `codex_hooks = true`. Events: `SessionStart`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `UserPromptSubmit`, `Stop`. Config at `~/.codex/hooks.json` or inline `[[hooks.<Event>]]` in `~/.codex/config.toml` (also project-level under `<repo>/.codex/`).                                  | `Stop` (provides `last_assistant_message` directly) + `PermissionRequest` (waiting for user) | Hook gets JSON on stdin. Naming/shape near-identical to Claude Code's hooks — converging de-facto standard.                                                                                                                                          |
+| **OpenAI Codex CLI**                 | Rich, behind a versioned feature flag (`hooks = true` on current Codex; older builds used `codex_hooks = true`). Events: `SessionStart`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `UserPromptSubmit`, `Stop`. Config at `~/.codex/hooks.json` or inline `[[hooks.<Event>]]` in `~/.codex/config.toml` (also project-level under `<repo>/.codex/`).                              | `Stop` (provides `last_assistant_message` directly) + `PermissionRequest` (waiting for user) | Hook gets JSON on stdin. Naming/shape near-identical to Claude Code's hooks — converging de-facto standard.                                                                                                                                          |
 | **OpenCode** (sst)                   | Plugin-based, not config-line hooks. TS/JS plugin in `.opencode/plugins/` or npm package referenced in `opencode.json`'s `plugin` array. Plugin receives an `event` handler firing on `session.idle`, `session.created`, `permission.asked`, `tool.execute.before`, `message.updated`, etc.                                | `session.idle` (turn finished) + `permission.asked` (waiting for user)                       | Heavier integration: we ship `@crier/opencode-plugin` as a one-file npm package that POSTs to the daemon.                                                                                                                                            |
 | **Cursor CLI** (`cursor-agent`)      | **Rich, as of Jan 2026.** `sessionStart`, `sessionEnd`, `beforeSubmitPrompt`, `preToolUse`, `postToolUse`, `subagentStart`, `subagentStop`, `beforeShellExecution`, `afterShellExecution`, `stop`, `afterAgentResponse`, `afterAgentThought`, `preCompact`, etc. via `~/.cursor/hooks.json` or `<repo>/.cursor/hooks.json`  | `stop` (turn finished) + `beforeShellExecution` w/ `permission: "ask"` (waiting for user)    | Hook receives JSON on stdin, can return JSON on stdout. Cursor docs claim it can also **load Claude Code's hook config** for cross-tool compat.                                                                                                      |
 | **Cursor background agents** (cloud) | Webhooks (cloud)                                                                                                                                                                                                                                                                                                           | HTTPS webhook → daemon                                                                       | Different shape — cloud-hosted. Daemon exposes a webhook endpoint they POST to.                                                                                                                                                                      |
@@ -199,16 +199,23 @@ The daemon picks the delivery mechanism from the `reply_channel` field set at ev
 
 ### Codex CLI (`~/.codex/config.toml`)
 
+Current Codex builds report the feature as `hooks` via `codex features list`.
+Older builds may require the legacy `codex_hooks` key; Crier's installer picks the key from the installed Codex version.
+
 ```toml
 [features]
-codex_hooks = true
+hooks = true
 
 [[hooks.Stop]]
+
+[[hooks.Stop.hooks]]
 type = "command"
 command = "/usr/local/bin/crier-emit codex turn_done"
 timeout = 10
 
 [[hooks.PermissionRequest]]
+
+[[hooks.PermissionRequest.hooks]]
 type = "command"
 command = "/usr/local/bin/crier-emit codex needs_permission"
 timeout = 10

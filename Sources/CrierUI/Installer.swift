@@ -368,14 +368,7 @@ enum Installer {
         // Strip any prior managed block.
         raw = stripCodexBlock(raw)
 
-        // Ensure [features] codex_hooks = true. We append a managed block
-        // for that too if nothing matches; if [features] already exists we
-        // assume the user has it (printing a warning to user is the bash
-        // behaviour, but the user can't see stdout from inside the GUI).
-        if !raw.contains("[features]") {
-            if !raw.isEmpty && !raw.hasSuffix("\n") { raw += "\n" }
-            raw += "\n[features]\ncodex_hooks = true\n"
-        }
+        raw = ensureCodexHooksFeature(in: raw, key: codexHooksFeatureKey())
 
         if !raw.hasSuffix("\n") { raw += "\n" }
         raw += """
@@ -420,6 +413,79 @@ enum Installer {
         var copy = s
         copy.removeSubrange(stripStart..<stripEnd)
         return copy
+    }
+
+    private static func codexHooksFeatureKey() -> String {
+        if let override = ProcessInfo.processInfo.environment["CRIER_CODEX_HOOKS_FEATURE_KEY"] {
+            return override == "codex_hooks" ? "codex_hooks" : "hooks"
+        }
+        if let features = runCommand(["codex", "features", "list"]) {
+            let keys = Set(features.split(whereSeparator: \.isNewline).compactMap { line in
+                line.split(whereSeparator: \.isWhitespace).first.map(String.init)
+            })
+            if keys.contains("hooks") { return "hooks" }
+            if keys.contains("codex_hooks") { return "codex_hooks" }
+        }
+        return "hooks"
+    }
+
+    private static func runCommand(_ args: [String]) -> String? {
+        guard !args.isEmpty else { return nil }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = args
+        let out = Pipe()
+        process.standardOutput = out
+        process.standardError = Pipe()
+        do { try process.run() } catch { return nil }
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return nil }
+        return String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)
+    }
+
+    private static func ensureCodexHooksFeature(in raw: String, key: String) -> String {
+        let lines = raw.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let oldKey = key == "hooks" ? "codex_hooks" : "hooks"
+
+        guard let featuresIndex = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == "[features]" }) else {
+            var out = raw
+            if !out.isEmpty && !out.hasSuffix("\n") { out += "\n" }
+            out += "\n[features]\n\(key) = true\n"
+            return out
+        }
+
+        let nextSection = lines[(featuresIndex + 1)...].firstIndex {
+            let trimmed = $0.trimmingCharacters(in: .whitespaces)
+            return trimmed.hasPrefix("[") && trimmed.hasSuffix("]")
+        } ?? lines.endIndex
+
+        var wroteFeature = false
+        var rewritten: [String] = []
+        for index in lines.indices {
+            guard index > featuresIndex && index < nextSection else {
+                rewritten.append(lines[index])
+                continue
+            }
+
+            let trimmed = lines[index].trimmingCharacters(in: .whitespaces)
+            let isCurrent = trimmed.hasPrefix("\(key) ")
+                || trimmed.hasPrefix("\(key)=")
+            let isLegacy = trimmed.hasPrefix("\(oldKey) ")
+                || trimmed.hasPrefix("\(oldKey)=")
+            if isCurrent || isLegacy {
+                if !wroteFeature {
+                    rewritten.append("\(key) = true")
+                    wroteFeature = true
+                }
+                continue
+            }
+            rewritten.append(lines[index])
+        }
+
+        if !wroteFeature {
+            rewritten.insert("\(key) = true", at: featuresIndex + 1)
+        }
+        return rewritten.joined(separator: "\n")
     }
 
     // MARK: - OpenCode

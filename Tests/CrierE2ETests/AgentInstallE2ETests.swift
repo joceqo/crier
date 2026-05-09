@@ -155,11 +155,10 @@ final class AgentInstallE2ETests: XCTestCase {
     // MARK: - Codex
 
     /// install-local-codex.sh should append [[hooks.Stop]] and
-    /// [[hooks.PermissionRequest]] blocks to ~/.codex/config.toml and refuse
-    /// to run a second time (the script bails with a guard message asking
-    /// the user to remove old entries by hand — that's the documented
-    /// contract; here we verify it).
-    func testCodexInstallAppendsHookBlocksAndGuardsAgainstReRun() throws {
+    /// [[hooks.PermissionRequest]] blocks to ~/.codex/config.toml and remain
+    /// re-runnable so updating Codex can switch feature flags without manual
+    /// cleanup.
+    func testCodexInstallAppendsHookBlocksAndIsIdempotent() throws {
         let emit = try requirePrebuiltCrierEmit()
 
         let home = try makeTempHome()
@@ -168,12 +167,16 @@ final class AgentInstallE2ETests: XCTestCase {
         let script = repoRoot + "/scripts/install-local-codex.sh"
         XCTAssertTrue(FileManager.default.fileExists(atPath: script), "install script missing at \(script)")
 
-        let env = ["HOME": home.path, "CRIER_EMIT_BIN": emit]
+        let env = ["HOME": home.path, "CRIER_EMIT_BIN": emit, "CRIER_CODEX_HOOKS_FEATURE_KEY": "hooks"]
         let (rc1, _, err1) = run("/bin/bash", args: [script], env: env)
         XCTAssertEqual(rc1, 0, "first install failed: \(err1)")
 
         let cfgPath = home.appendingPathComponent(".codex/config.toml").path
         let firstContent = try String(contentsOfFile: cfgPath, encoding: .utf8)
+        XCTAssertTrue(firstContent.contains("hooks = true"),
+                      "missing Codex hooks feature flag: \(firstContent)")
+        XCTAssertFalse(firstContent.contains("codex_hooks = true"),
+                       "deprecated Codex hooks feature flag should not be written: \(firstContent)")
         XCTAssertTrue(firstContent.contains("[[hooks.Stop]]"),
                       "missing [[hooks.Stop]] block: \(firstContent)")
         XCTAssertTrue(firstContent.contains("[[hooks.PermissionRequest]]"),
@@ -190,11 +193,90 @@ final class AgentInstallE2ETests: XCTestCase {
         XCTAssertTrue(firstContent.contains("crier-emit codex needs_permission"),
                       "PermissionRequest block does not invoke crier-emit codex needs_permission")
 
-        // Re-run guard — script should exit non-zero and not duplicate blocks.
+        // Re-run should refresh the managed block without duplicating hooks.
         let (rc2, _, err2) = run("/bin/bash", args: [script], env: env)
-        XCTAssertNotEqual(rc2, 0, "second install should refuse but exited 0; stderr=\(err2)")
+        XCTAssertEqual(rc2, 0, "second install failed: \(err2)")
         let secondContent = try String(contentsOfFile: cfgPath, encoding: .utf8)
-        XCTAssertEqual(secondContent, firstContent, "config.toml mutated on guarded second run")
+        let stopCount = secondContent.components(separatedBy: "crier-emit codex turn_done").count - 1
+        let permCount = secondContent.components(separatedBy: "crier-emit codex needs_permission").count - 1
+        XCTAssertEqual(stopCount, 1, "duplicate turn_done hook after re-run")
+        XCTAssertEqual(permCount, 1, "duplicate needs_permission hook after re-run")
+    }
+
+    func testCodexInstallCanUseLegacyFeatureFlagForOlderCodex() throws {
+        let emit = try requirePrebuiltCrierEmit()
+
+        let home = try makeTempHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+
+        let script = repoRoot + "/scripts/install-local-codex.sh"
+        let env = [
+            "HOME": home.path,
+            "CRIER_EMIT_BIN": emit,
+            "CRIER_CODEX_HOOKS_FEATURE_KEY": "codex_hooks",
+        ]
+        let (rc, _, err) = run("/bin/bash", args: [script], env: env)
+        XCTAssertEqual(rc, 0, "install failed: \(err)")
+
+        let cfgPath = home.appendingPathComponent(".codex/config.toml").path
+        let content = try String(contentsOfFile: cfgPath, encoding: .utf8)
+        XCTAssertTrue(content.contains("codex_hooks = true"),
+                      "missing legacy Codex hooks feature flag: \(content)")
+        XCTAssertFalse(content.contains("\nhooks = true"),
+                       "modern Codex hooks feature flag should not be written for legacy override: \(content)")
+    }
+
+    func testCodexInstallUpgradesDeprecatedFeatureFlagForModernCodex() throws {
+        let emit = try requirePrebuiltCrierEmit()
+
+        let home = try makeTempHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let codexDir = home.appendingPathComponent(".codex")
+        try FileManager.default.createDirectory(at: codexDir, withIntermediateDirectories: true)
+        let cfg = codexDir.appendingPathComponent("config.toml")
+        try "[features]\ncodex_hooks = true\n".write(to: cfg, atomically: true, encoding: .utf8)
+
+        let script = repoRoot + "/scripts/install-local-codex.sh"
+        let env = ["HOME": home.path, "CRIER_EMIT_BIN": emit, "CRIER_CODEX_HOOKS_FEATURE_KEY": "hooks"]
+        let (rc, _, err) = run("/bin/bash", args: [script], env: env)
+        XCTAssertEqual(rc, 0, "install failed: \(err)")
+
+        let content = try String(contentsOfFile: cfg.path, encoding: .utf8)
+        XCTAssertTrue(content.contains("hooks = true"),
+                      "missing modern Codex hooks feature flag: \(content)")
+        XCTAssertFalse(content.contains("codex_hooks = true"),
+                       "deprecated Codex hooks feature flag should be replaced: \(content)")
+    }
+
+    func testCodexInstallCanReinstallAfterCodexFeatureFlagChanges() throws {
+        let emit = try requirePrebuiltCrierEmit()
+
+        let home = try makeTempHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+
+        let script = repoRoot + "/scripts/install-local-codex.sh"
+        let legacyEnv = [
+            "HOME": home.path,
+            "CRIER_EMIT_BIN": emit,
+            "CRIER_CODEX_HOOKS_FEATURE_KEY": "codex_hooks",
+        ]
+        let (legacyRC, _, legacyErr) = run("/bin/bash", args: [script], env: legacyEnv)
+        XCTAssertEqual(legacyRC, 0, "legacy install failed: \(legacyErr)")
+
+        let modernEnv = ["HOME": home.path, "CRIER_EMIT_BIN": emit, "CRIER_CODEX_HOOKS_FEATURE_KEY": "hooks"]
+        let (modernRC, _, modernErr) = run("/bin/bash", args: [script], env: modernEnv)
+        XCTAssertEqual(modernRC, 0, "modern reinstall failed after Codex update: \(modernErr)")
+
+        let cfgPath = home.appendingPathComponent(".codex/config.toml").path
+        let content = try String(contentsOfFile: cfgPath, encoding: .utf8)
+        XCTAssertTrue(content.contains("hooks = true"),
+                      "modern Codex hooks feature flag should be written after reinstall: \(content)")
+        XCTAssertFalse(content.contains("codex_hooks = true"),
+                       "legacy Codex hooks feature flag should be removed after reinstall: \(content)")
+        XCTAssertEqual(content.components(separatedBy: "crier-emit codex turn_done").count - 1, 1,
+                       "duplicate turn_done hook after reinstall: \(content)")
+        XCTAssertEqual(content.components(separatedBy: "crier-emit codex needs_permission").count - 1, 1,
+                       "duplicate needs_permission hook after reinstall: \(content)")
     }
 
     // MARK: - OpenCode plugin
