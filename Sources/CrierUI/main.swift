@@ -228,6 +228,9 @@ final class CrierState: ObservableObject, @unchecked Sendable {
     @Published var selectedSessionKey: String?
     @Published var focusGen: Int = 0
     @Published var showDisableDialog: Bool = false
+    /// In-memory only: when compact overlay is enabled, false shows the slim session list;
+    /// true shows the full reply panel. Reset when the panel is fully dismissed.
+    @Published var compactPanelExpanded: Bool = false
 
     var selectedSession: CrierSession? {
         guard let k = selectedSessionKey else { return nil }
@@ -396,7 +399,7 @@ struct DisableSessionDialog: View {
     }
 
     private var bodyText: Text {
-        Text("Leave closes the panel for this turn — Crier pops again on the next message. Disable silences this conversation; re-enable from the menu-bar megaphone → Conversations…")
+        Text("Leave closes the panel for this turn — Crier pops again on the next message. Disable silences this conversation; re-enable from the menu-bar megaphone → Conversations… Overlay layout (compact summary bar) is in Settings…")
             .foregroundStyle(.secondary)
             .font(.system(size: 13))
     }
@@ -410,8 +413,6 @@ struct DisableSessionDialog: View {
 // flag, which is the same mechanism `crier-emit` checks before posting an
 // event.
 //
-// The "Settings" section is intentionally a placeholder until we have real
-// per-app preferences to expose.
 struct ConversationsView: View {
     @ObservedObject var state: CrierState
     @State private var disabledCwdKnown: [String] = []
@@ -482,10 +483,10 @@ struct ConversationsView: View {
                 }
             }
 
-            Section("Settings") {
-                Text("More options coming soon.")
-                    .foregroundStyle(.secondary)
+            Section {
+                Text("Open Settings… from the menu bar for overlay options (compact summary bar).")
                     .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
             }
         }
         .listStyle(.sidebar)
@@ -1025,6 +1026,182 @@ struct PanelContentSizeKey: PreferenceKey {
     }
 }
 
+// Slim overlay: session table + activity count. Does not ship the message
+// card or reply field — user expands to `CrierPanelView` when ready.
+private struct CompactCrierOverlayView: View {
+    @ObservedObject var state: CrierState
+    @Binding var expanded: Bool
+    let onCancel: () -> Void
+    let onContentSize: (CGSize) -> Void
+
+    private func rowTitle(for s: CrierSession) -> String {
+        if !s.projectName.isEmpty { return s.projectName }
+        if let cwd = s.cwd, !cwd.isEmpty { return cwd }
+        return s.agentName
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Image(systemName: "megaphone.fill")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.secondary)
+
+                Text("Crier")
+                    .font(.system(size: 13, weight: .semibold))
+
+                Text("\(state.sessions.count)")
+                    .font(.system(size: 11, weight: .bold))
+                    .monospacedDigit()
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(Color.accentColor.opacity(0.22)))
+
+                Spacer(minLength: 8)
+
+                Button {
+                    expanded = true
+                } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 13, weight: .medium))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.primary)
+                .padding(6)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                .help("Expand to full panel")
+            }
+            .padding(.horizontal, 4)
+            .padding(.vertical, 2)
+            .background(WindowDragRegion())
+
+            Text("Sessions")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 4)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(state.sessions) { sess in
+                        let selected = sess.id == state.selectedSessionKey
+                        Button {
+                            state.selectSession(id: sess.id)
+                            expanded = true
+                        } label: {
+                            HStack(spacing: 8) {
+                                AgentBrandIconView(agent: sess.agentName)
+                                    .frame(width: 16, height: 16)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(rowTitle(for: sess))
+                                        .font(.system(size: 12, weight: selected ? .semibold : .regular))
+                                        .foregroundStyle(.primary)
+                                        .lineLimit(1)
+                                    if !sess.eventKind.isEmpty && sess.eventKind != "turn_done" {
+                                        Text(sess.eventKind)
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                    }
+                                }
+                                Spacer(minLength: 4)
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .padding(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .fill(Color(nsColor: selected ? .selectedControlColor : .controlColor))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 2)
+            }
+            .frame(maxHeight: 240)
+
+            HStack {
+                Button(action: onCancel) {
+                    HStack(spacing: 5) {
+                        Text("Dismiss")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                        Keycap(label: "esc")
+                    }
+                }
+                .buttonStyle(.plain)
+                Spacer()
+            }
+
+            Button("", action: onCancel)
+                .keyboardShortcut(.cancelAction)
+                .opacity(0)
+                .frame(width: 0, height: 0)
+        }
+        .padding(16)
+        .frame(width: 320)
+        .fixedSize(horizontal: false, vertical: true)
+        .crierCard(cornerRadius: 16)
+        .background(
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: PanelContentSizeKey.self,
+                    value: proxy.size
+                )
+            }
+        )
+        .onPreferenceChange(PanelContentSizeKey.self, perform: onContentSize)
+    }
+}
+
+/// Chooses compact summary vs full panel. Compact mode is tracked by
+/// `CrierPreferences.compactOverlay` (`UserDefaults` key `crierCompactOverlay`);
+/// expanded/collapsed while the panel is up is `CrierState.compactPanelExpanded`
+/// (reset when the panel hides).
+private struct CrierPanelContainerView: View {
+    @ObservedObject var state: CrierState
+    @ObservedObject var preferences: CrierPreferences
+
+    let onSubmit: () -> Void
+    let onCancel: () -> Void
+    let onDisableSession: () -> Void
+    let onSessionDisable: (CrierSession) -> Void
+    let onSessionMute: (CrierSession, Int) -> Void
+    let onContentSize: (CGSize) -> Void
+
+    var body: some View {
+        Group {
+            if preferences.compactOverlay && !state.compactPanelExpanded {
+                CompactCrierOverlayView(
+                    state: state,
+                    expanded: $state.compactPanelExpanded,
+                    onCancel: onCancel,
+                    onContentSize: onContentSize
+                )
+            } else {
+                CrierPanelView(
+                    state: state,
+                    onSubmit: onSubmit,
+                    onCancel: onCancel,
+                    onDisableSession: onDisableSession,
+                    onSessionDisable: onSessionDisable,
+                    onSessionMute: onSessionMute,
+                    onContentSize: onContentSize,
+                    onRequestCompactCollapse: preferences.compactOverlay
+                        ? { state.compactPanelExpanded = false }
+                        : nil
+                )
+            }
+        }
+    }
+}
+
 struct CrierPanelView: View {
     @ObservedObject var state: CrierState
     @FocusState private var fieldFocused: Bool
@@ -1036,6 +1213,8 @@ struct CrierPanelView: View {
     let onSessionDisable: (CrierSession) -> Void
     let onSessionMute: (CrierSession, Int) -> Void
     let onContentSize: (CGSize) -> Void
+    /// When set (compact-overlay mode), shows a control to return to the slim session list.
+    var onRequestCompactCollapse: (() -> Void)? = nil
 
     private var selected: CrierSession? { state.selectedSession }
 
@@ -1053,6 +1232,17 @@ struct CrierPanelView: View {
                     onDisable: onSessionDisable,
                     onMute: onSessionMute
                 )
+                if let collapse = onRequestCompactCollapse {
+                    Button(action: collapse) {
+                        Image(systemName: "arrow.down.right.and.arrow.up.left")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .padding(6)
+                            .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Show summary bar only")
+                }
                 if let kind = selected?.eventKind, !kind.isEmpty && kind != "turn_done" {
                     Text(kind)
                         .font(.system(size: 11, weight: .medium, design: .rounded))
@@ -1201,6 +1391,7 @@ final class CrierBorderlessPanel: NSPanel {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
     let state = CrierState()
+    let preferences = CrierPreferences()
     /// Sparkle: background update checks + "Check for Updates…". Retain for menu target.
     private lazy var updaterController = SPUStandardUpdaterController(
         startingUpdater: true,
@@ -1220,7 +1411,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     var lastTerminalApp: NSRunningApplication?
     var statusItem: NSStatusItem?
     var statusDisableItem: NSMenuItem?
+    private var statusCompactOverlayItem: NSMenuItem?
     var conversationsWindow: NSWindow?
+    var settingsWindow: NSWindow?
     var setupWindow: NSWindow?
     /// Fires when a menu-bar pause expires (mirrors `pause-until` on disk for crier-emit).
     private var pauseEndTimer: Timer?
@@ -1307,6 +1500,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         )
         conversationsItem.target = self
         menu.addItem(conversationsItem)
+
+        let settingsItem = NSMenuItem(
+            title: "Settings…",
+            action: #selector(openSettingsWindow(_:)),
+            keyEquivalent: ";"
+        )
+        settingsItem.keyEquivalentModifierMask = .command
+        settingsItem.target = self
+        menu.addItem(settingsItem)
+
+        let compactOverlayItem = NSMenuItem(
+            title: "Compact overlay",
+            action: #selector(toggleCompactOverlayMenu(_:)),
+            keyEquivalent: ""
+        )
+        compactOverlayItem.target = self
+        menu.addItem(compactOverlayItem)
+        statusCompactOverlayItem = compactOverlayItem
 
         let feedbackItem = NSMenuItem(
             title: "Send Feedback…",
@@ -1408,6 +1619,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         } else {
             statusPauseCancelItem?.title = "Cancel Pause"
         }
+
+        statusCompactOverlayItem?.state = preferences.compactOverlay ? .on : .off
     }
 
     private func schedulePauseEndTimer(until end: Date) {
@@ -1586,6 +1799,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    @objc private func openSettingsWindow(_ sender: Any?) {
+        if let w = settingsWindow {
+            w.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let view = SettingsView(preferences: preferences)
+        let hosting = NSHostingController(rootView: view)
+        let w = NSWindow(contentViewController: hosting)
+        w.title = "Crier Settings"
+        w.styleMask = [.titled, .closable, .miniaturizable]
+        w.setContentSize(NSSize(width: 480, height: 340))
+        w.center()
+        w.isReleasedWhenClosed = false
+        settingsWindow = w
+        w.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func toggleCompactOverlayMenu(_ sender: Any?) {
+        preferences.compactOverlay.toggle()
+        refreshStatusMenuState()
+    }
+
     // Setup window — same lazy/single-instance pattern as the Conversations
     // window. Auto-shown on first launch when any detected agent isn't wired
     // (see applicationDidFinishLaunching), also reachable from the status
@@ -1652,8 +1889,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         installStatusItem()
         installShortcutMonitor()
         resyncPauseTimerFromDisk()
-        let view = CrierPanelView(
+        let view = CrierPanelContainerView(
             state: state,
+            preferences: preferences,
             onSubmit: { [weak self] in self?.submit() },
             onCancel: { [weak self] in self?.cancel() },
             onDisableSession: { [weak self] in self?.confirmDisableSession() },
@@ -1772,18 +2010,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         positionPanelCentered()
     }
 
-    // Resize the panel to match SwiftUI's reported ideal size. Width stays
-    // pinned at 640 (the SwiftUI root sets it explicitly); height tracks
-    // content but is clamped so a runaway message can't fill the screen.
+    // Resize the panel to match SwiftUI's reported ideal size. Width comes
+    // from the root view (640 full panel, ~320 compact summary); height
+    // tracks content but is clamped so a runaway message can't fill the screen.
     // `setContentSize` keeps origin.y (the bottom edge in AppKit coords)
     // fixed, so a growing message expands upward and the user's drag
     // position is preserved.
     func applyContentSize(_ size: CGSize) {
-        guard size.height > 0 else { return }
-        let height = min(max(size.height, 120), 720)
-        let newSize = NSSize(width: 640, height: height)
+        guard size.height > 0, size.width > 0 else { return }
+        let height = min(max(size.height, 80), 720)
+        let width = min(max(size.width, 260), 720)
+        let newSize = NSSize(width: width, height: height)
         let currentContent = panel.contentRect(forFrameRect: panel.frame).size
-        if abs(currentContent.height - height) < 0.5 {
+        if abs(currentContent.height - height) < 0.5, abs(currentContent.width - width) < 0.5 {
             uiLog("applyContentSize — reported=\(size) current=\(currentContent) → unchanged")
             return
         }
@@ -1818,6 +2057,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         // instead of recentering — even though the original drag intent
         // ended when the user dismissed that session.
         userPositionedPanel = false
+        state.compactPanelExpanded = false
     }
 
     // Esc / Dismiss: closes the current session tab. For the legacy
@@ -2118,6 +2358,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
     }
 }
+
+/// Seeds `crierCompactOverlay` from the environment when present, so you can
+/// launch with `CRIER_COMPACT_OVERLAY=1 ./crier-ui` (dev) or the same prefix on
+/// `Crier.app/Contents/MacOS/Crier` without using `defaults(1)`.
+private func applyCompactOverlayEnvironmentOverride() {
+    guard let raw = ProcessInfo.processInfo.environment["CRIER_COMPACT_OVERLAY"]?
+        .trimmingCharacters(in: .whitespacesAndNewlines),
+        !raw.isEmpty else { return }
+    let value: Bool?
+    switch raw.lowercased() {
+    case "1", "true", "yes", "on": value = true
+    case "0", "false", "no", "off": value = false
+    default: value = nil
+    }
+    guard let value else { return }
+    UserDefaults.standard.set(value, forKey: CrierPreferenceKeys.compactOverlay)
+}
+
+applyCompactOverlayEnvironmentOverride()
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)

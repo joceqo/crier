@@ -62,6 +62,7 @@ Build and test:
 ```bash
 swift build                                      # all four CLI/UI executables
 swift test                                       # Swift unit tests
+./scripts/build-app.sh                           # refresh Crier.app — run this after UI changes or the menubar app stays on an old binary
 ( cd packages/opencode-plugin && npm i && npm run build )
 ```
 
