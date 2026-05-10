@@ -399,7 +399,7 @@ struct DisableSessionDialog: View {
     }
 
     private var bodyText: Text {
-        Text("Leave closes the panel for this turn — Crier pops again on the next message. Disable silences this conversation; re-enable from the menu-bar megaphone → Conversations… Overlay layout (compact summary bar) is in Settings…")
+        Text("Leave closes the panel for this turn — Crier pops again on the next message. Disable silences this conversation; re-enable from the menu-bar megaphone → Settings… → Conversations. Overlay layout is in Settings…")
             .foregroundStyle(.secondary)
             .font(.system(size: 13))
     }
@@ -484,7 +484,7 @@ struct ConversationsView: View {
             }
 
             Section {
-                Text("Open Settings… from the menu bar for overlay options (compact summary bar).")
+                Text("Open Settings… from the menu bar for compact overlay, global disable, logs, and Conversations.")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             }
@@ -1411,7 +1411,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     var subscriberTask: Task<Void, Never>?
     var lastTerminalApp: NSRunningApplication?
     var statusItem: NSStatusItem?
-    var statusDisableItem: NSMenuItem?
     private var statusCompactOverlayItem: NSMenuItem?
     var conversationsWindow: NSWindow?
     var settingsWindow: NSWindow?
@@ -1494,14 +1493,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         setupItem.target = self
         menu.addItem(setupItem)
 
-        let conversationsItem = NSMenuItem(
-            title: "Conversations…",
-            action: #selector(openConversationsWindow(_:)),
-            keyEquivalent: ","
-        )
-        conversationsItem.target = self
-        menu.addItem(conversationsItem)
-
         let settingsItem = NSMenuItem(
             title: "Settings…",
             action: #selector(openSettingsWindow(_:)),
@@ -1528,14 +1519,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         feedbackItem.target = self
         menu.addItem(feedbackItem)
 
-        let revealLogsItem = NSMenuItem(
-            title: "Reveal Logs in Finder…",
-            action: #selector(revealLogsInFinder(_:)),
-            keyEquivalent: ""
-        )
-        revealLogsItem.target = self
-        menu.addItem(revealLogsItem)
-
         let checkUpdatesItem = NSMenuItem(
             title: "Check for Updates…",
             action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
@@ -1545,15 +1528,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         menu.addItem(checkUpdatesItem)
 
         menu.addItem(.separator())
-
-        let disableItem = NSMenuItem(
-            title: "Disable Crier (Global)",
-            action: #selector(toggleGlobalDisable(_:)),
-            keyEquivalent: ""
-        )
-        disableItem.target = self
-        statusDisableItem = disableItem
-        menu.addItem(disableItem)
 
         let pauseItem = NSMenuItem(title: "Pause", action: nil, keyEquivalent: "")
         let pauseSubmenu = NSMenu(title: "Pause")
@@ -1603,12 +1577,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         refreshStatusMenuState()
     }
 
-    /// Updates Disable checkmark and Pause affordances whenever the menu opens or silence state changes.
+    /// Updates compact-overlay checkmark and Pause affordances whenever the menu opens or silence state changes.
     private func refreshStatusMenuState() {
-        let perm = FileManager.default.fileExists(atPath: CrierEmitCore.globalDisabledPath)
-        statusDisableItem?.title = perm ? "Enable Crier (Global)" : "Disable Crier (Global)"
-        statusDisableItem?.state = perm ? .on : .off
-
         let pauseEnd = CrierEmitCore.globalPauseExpiry()
         let pausing = pauseEnd != nil
         statusPauseCancelItem?.isEnabled = pausing
@@ -1806,12 +1776,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             NSApp.activate(ignoringOtherApps: true)
             return
         }
-        let view = SettingsView(preferences: preferences)
+        let view = SettingsView(
+            preferences: preferences,
+            onOpenConversations: { [weak self] in self?.openConversationsWindow(nil) },
+            onRevealLogs: { [weak self] in self?.revealLogsInFinder(nil) },
+            onToggleGlobalDisable: { [weak self] in self?.toggleGlobalDisable(nil) }
+        )
         let hosting = NSHostingController(rootView: view)
         let w = NSWindow(contentViewController: hosting)
         w.title = "Crier Settings"
         w.styleMask = [.titled, .closable, .miniaturizable]
-        w.setContentSize(NSSize(width: 480, height: 340))
+        w.setContentSize(NSSize(width: 500, height: 480))
         w.center()
         w.isReleasedWhenClosed = false
         settingsWindow = w
@@ -1871,6 +1846,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                     return nil
                 }
                 return event
+            case ",":
+                self.openConversationsWindow(nil)
+                return nil
             default:
                 return event
             }
