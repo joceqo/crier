@@ -1041,96 +1041,97 @@ private struct CompactCrierOverlayView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
                 Image(systemName: "megaphone.fill")
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.secondary)
 
                 Text("Crier")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 12, weight: .semibold))
 
                 Text("\(state.sessions.count)")
-                    .font(.system(size: 11, weight: .bold))
+                    .font(.system(size: 10, weight: .bold))
                     .monospacedDigit()
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
                     .background(Capsule().fill(Color.accentColor.opacity(0.22)))
 
-                Spacer(minLength: 8)
+                Spacer(minLength: 4)
 
                 Button {
                     expanded = true
                 } label: {
                     Image(systemName: "arrow.up.left.and.arrow.down.right")
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.system(size: 11, weight: .medium))
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.primary)
-                .padding(6)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                .padding(4)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
                 .help("Expand to full panel")
             }
-            .padding(.horizontal, 4)
-            .padding(.vertical, 2)
+            .padding(.horizontal, 2)
+            .padding(.vertical, 1)
             .background(WindowDragRegion())
 
             Text("Sessions")
-                .font(.system(size: 11, weight: .semibold))
+                .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.secondary)
-                .padding(.horizontal, 4)
+                .padding(.leading, 2)
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 5) {
+                VStack(alignment: .leading, spacing: 4) {
                     ForEach(state.sessions) { sess in
                         let selected = sess.id == state.selectedSessionKey
                         Button {
                             state.selectSession(id: sess.id)
                             expanded = true
                         } label: {
-                            HStack(spacing: 8) {
+                            HStack(spacing: 6) {
                                 AgentBrandIconView(agent: sess.agentName)
-                                    .frame(width: 16, height: 16)
-                                VStack(alignment: .leading, spacing: 2) {
+                                    .frame(width: 14, height: 14)
+                                VStack(alignment: .leading, spacing: 1) {
                                     Text(rowTitle(for: sess))
-                                        .font(.system(size: 12, weight: selected ? .semibold : .regular))
+                                        .font(.system(size: 11, weight: selected ? .semibold : .regular))
                                         .foregroundStyle(.primary)
                                         .lineLimit(1)
                                     if !sess.eventKind.isEmpty && sess.eventKind != "turn_done" {
                                         Text(sess.eventKind)
-                                            .font(.system(size: 10))
+                                            .font(.system(size: 9))
                                             .foregroundStyle(.secondary)
                                             .lineLimit(1)
                                     }
                                 }
-                                Spacer(minLength: 4)
+                                Spacer(minLength: 2)
                                 Image(systemName: "chevron.right")
-                                    .font(.system(size: 10, weight: .semibold))
+                                    .font(.system(size: 9, weight: .semibold))
                                     .foregroundStyle(.tertiary)
                             }
-                            .padding(10)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 7)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .background(
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
                                     .fill(Color(nsColor: selected ? .selectedControlColor : .controlColor))
                             )
                             .overlay(
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
                                     .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
                             )
                         }
                         .buttonStyle(.plain)
                     }
                 }
-                .padding(.horizontal, 2)
+                .padding(.horizontal, 0)
             }
-            .frame(maxHeight: 240)
+            .frame(maxHeight: 152)
 
             HStack {
                 Button(action: onCancel) {
-                    HStack(spacing: 5) {
+                    HStack(spacing: 4) {
                         Text("Dismiss")
-                            .font(.system(size: 12))
+                            .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                         Keycap(label: "esc")
                     }
@@ -1144,10 +1145,10 @@ private struct CompactCrierOverlayView: View {
                 .opacity(0)
                 .frame(width: 0, height: 0)
         }
-        .padding(16)
-        .frame(width: 320)
+        .padding(10)
+        .frame(width: 264)
         .fixedSize(horizontal: false, vertical: true)
-        .crierCard(cornerRadius: 16)
+        .crierCard(cornerRadius: 12)
         .background(
             GeometryReader { proxy in
                 Color.clear.preference(
@@ -1908,6 +1909,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             defer: false
         )
         panel.contentView = hosting
+        panel.title = "Crier"
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
         panel.isFloatingPanel = true
@@ -2011,7 +2013,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     // Resize the panel to match SwiftUI's reported ideal size. Width comes
-    // from the root view (640 full panel, ~320 compact summary); height
+    // from the root view (640 full panel, ~264 compact summary); height
     // tracks content but is clamped so a runaway message can't fill the screen.
     // `setContentSize` keeps origin.y (the bottom edge in AppKit coords)
     // fixed, so a growing message expands upward and the user's drag
@@ -2019,7 +2021,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     func applyContentSize(_ size: CGSize) {
         guard size.height > 0, size.width > 0 else { return }
         let height = min(max(size.height, 80), 720)
-        let width = min(max(size.width, 260), 720)
+        let width = min(max(size.width, 236), 720)
         let newSize = NSSize(width: width, height: height)
         let currentContent = panel.contentRect(forFrameRect: panel.frame).size
         if abs(currentContent.height - height) < 0.5, abs(currentContent.width - width) < 0.5 {
