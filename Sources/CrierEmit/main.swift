@@ -142,7 +142,9 @@ let stdinData = FileHandle.standardInput.readDataToEndOfFile()
 let stdinJSON = (try? JSONSerialization.jsonObject(with: stdinData)) as? [String: Any] ?? [:]
 
 let env = ProcessInfo.processInfo.environment
-let crierPort = Int(env["CRIER_PORT"] ?? "") ?? 8731
+// AIDOCK_PORT is the aidock-branded var (this binary is staged as `aidock-emit`);
+// CRIER_PORT stays as a fallback for legacy hooks. Default 8731 = the old crier.
+let crierPort = Int(env["AIDOCK_PORT"] ?? env["CRIER_PORT"] ?? "") ?? 8731
 let crierBase = "http://127.0.0.1:\(crierPort)"
 let rawCwd = (stdinJSON["cwd"] as? String) ?? FileManager.default.currentDirectoryPath
 // Cursor (and possibly others) reports its config dir as `cwd` in hook
