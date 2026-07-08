@@ -124,6 +124,16 @@ guard args.count >= 3 else {
 let agent = args[1]
 let event = args[2]
 
+// Headless agents spawned BY aidock's gateway (e.g. `claude -p` serving a
+// voice-loop summary) inherit AIDOCK_SPAWNED=1 from the daemon. Their turns
+// are machine-to-machine — emitting them would feed the daemon's own events
+// back into the overlay/conversation loop (and clobber the real session's
+// reply routing). Skip before any network or stdin work.
+if ProcessInfo.processInfo.environment["AIDOCK_SPAWNED"] != nil {
+    log("suppressed: AIDOCK_SPAWNED set (gateway-spawned agent) — skipping")
+    exit(0)
+}
+
 // When cursor-agent runs, both ~/.cursor/hooks.json (cursor) and
 // ~/.claude/settings.json (claude-code) Stop hooks fire on the same
 // turn. The server dedups them by transcript_path (first wins), but
